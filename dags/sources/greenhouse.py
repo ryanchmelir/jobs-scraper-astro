@@ -79,17 +79,40 @@ class GreenhouseSource(BaseSource):
                 
         return listings
     
-    def get_job_detail_url(self, job_listing: JobListing) -> str:
+    def get_listing_url(self, listing) -> str:
+        """
+        Get the URL for a job listing, handling both JobListing objects and dictionaries.
+        
+        Args:
+            listing: Either a JobListing object or a dictionary with job data
+            
+        Returns:
+            Full URL for the job listing
+        """
+        # If it's already a JobListing object, use its URL
+        if isinstance(listing, JobListing):
+            return listing.url
+            
+        # If it's a dictionary, construct the URL
+        if isinstance(listing, dict):
+            job_id = listing.get('source_job_id') or listing.get('id')
+            if not job_id:
+                raise ValueError("Listing dictionary must have 'source_job_id' or 'id'")
+            return f"https://boards.greenhouse.io/jobs/{job_id}"
+            
+        raise TypeError(f"Expected JobListing or dict, got {type(listing)}")
+        
+    def get_job_detail_url(self, listing) -> str:
         """
         Get the URL for a specific job's detail page.
         
         Args:
-            job_listing: JobListing object with the job's URL
+            listing: Either a JobListing object or a dictionary with the job's data
             
         Returns:
             URL string for the job detail page
         """
-        return job_listing.url
+        return self.get_listing_url(listing)
     
     def parse_job_details(self, html_content: str, job_listing: JobListing) -> JobListing:
         """Parse the job detail page HTML and update the job listing with full details.

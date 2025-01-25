@@ -126,10 +126,11 @@ def job_scraper_dag():
                 listings_dict = [
                     {
                         'id': listing.source_job_id,
+                        'source_job_id': listing.source_job_id,  # Store explicitly for URL construction
                         'title': listing.title,
                         'location': listing.location,
                         'department': listing.department,
-                        'url': listing.url,
+                        'url': source_handler.get_listing_url(listing),
                         'raw_data': listing.raw_data
                     }
                     for listing in listings
