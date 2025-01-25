@@ -50,10 +50,10 @@ class Settings(BaseSettings):
             }
             logger.info(f"Built initial DSN parts: {dsn_parts}")
             
-            # Only add schema if it exists, without leading slash
+            # Add schema with leading slash
             if conn.schema:
-                dsn_parts["path"] = conn.schema
-                logger.info(f"Added schema to path: {conn.schema}")
+                dsn_parts["path"] = f"/{conn.schema}"  # Add leading slash
+                logger.info(f"Added schema to path: {dsn_parts['path']}")
             
             # Add SSL mode if specified in extras
             if conn.extra_dejson.get("sslmode"):
