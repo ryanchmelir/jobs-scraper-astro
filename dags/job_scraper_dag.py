@@ -106,13 +106,13 @@ def job_scraper_dag():
         """
         # Initialize the appropriate source handler
         if source['source_type'] == SourceType.GREENHOUSE.value:
-            source_handler = GreenhouseSource(source['source_id'])
+            source_handler = GreenhouseSource()
         else:
             raise ValueError(f"Unsupported source type: {source['source_type']}")
         
         # Get the listings URL and scraping config
-        listings_url = source_handler.get_listings_url()
-        scraping_config = source_handler.prepare_scraping_config()
+        listings_url = source_handler.get_listings_url(source['source_id'])
+        scraping_config = source_handler.prepare_scraping_config(listings_url)
         
         # Prepare ScrapingBee request
         params = {
@@ -203,7 +203,7 @@ def job_scraper_dag():
             
         # Initialize source handler
         if source['source_type'] == SourceType.GREENHOUSE.value:
-            source_handler = GreenhouseSource(source['source_id'])
+            source_handler = GreenhouseSource()
         else:
             raise ValueError(f"Unsupported source type: {source['source_type']}")
             
@@ -219,7 +219,7 @@ def job_scraper_dag():
         for listing in new_job_listings:
             try:
                 # Get job detail URL
-                detail_url = source_handler.get_job_detail_url(listing['id'])
+                detail_url = source_handler.get_job_detail_url(listing)
                 
                 # Prepare ScrapingBee request
                 params = {
@@ -227,7 +227,7 @@ def job_scraper_dag():
                     'url': detail_url,
                     'wait': 'domcontentloaded',
                     'premium_proxy': 'true',
-                    **source_handler.prepare_scraping_config()
+                    **source_handler.prepare_scraping_config(detail_url)
                 }
                 
                 # Make the request
@@ -237,7 +237,7 @@ def job_scraper_dag():
                     response.raise_for_status()
                     
                     # Parse job details and merge with listing data
-                    job_details = source_handler.parse_job_details(response.text)
+                    job_details = source_handler.parse_job_details(response.text, listing)
                     detailed_job = {**listing, **job_details}
                     detailed_jobs.append(detailed_job)
                     
