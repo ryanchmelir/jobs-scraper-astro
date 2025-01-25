@@ -1,0 +1,12 @@
+# Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
+
+apache-airflow>=2.7.0
+psycopg2-binary>=2.9.9  # PostgreSQL adapter
+requests>=2.31.0  # For HTTP requests
+beautifulsoup4>=4.12.2  # For HTML parsing
+python-dotenv>=1.0.0  # For environment variables
+sqlalchemy>=2.0.23  # For database operations
+httpx>=0.25.2  # Modern HTTP client
+lxml>=4.9.3  # For XML/HTML processing
+aiohttp>=3.9.1  # For async HTTP
+pydantic>=2.5.2  # For settings management
