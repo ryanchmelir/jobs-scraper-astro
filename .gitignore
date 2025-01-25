@@ -13,3 +13,5 @@ dag_architecture.md
 plan.md
 scrapingbee.md
 issue.md
+scripts/test_scrape.py
+data/
