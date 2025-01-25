@@ -110,15 +110,15 @@ class GreenhouseSource(BaseSource):
         """
         return self.get_listing_url(listing)
     
-    def parse_job_details(self, html_content: str, job_listing: JobListing) -> JobListing:
+    def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
         """Parse the job detail page HTML and update the job listing with full details.
         
         Args:
             html_content: The HTML content of the job detail page
-            job_listing: The existing job listing with basic info
+            job_listing: The existing job listing with basic info (dict or JobListing)
             
         Returns:
-            Updated JobListing with full details
+            Dictionary with full job details
         """
         tree = html.fromstring(html_content)
         
@@ -138,19 +138,22 @@ class GreenhouseSource(BaseSource):
         # Get full description
         description = html.tostring(content_div, encoding='unicode')
         
-        # Create new job listing with updated fields
-        return JobListing(
-            source_job_id=job_listing.source_job_id,
-            title=title,
-            location=location,
-            department=department,
-            raw_data={
+        # Get source_job_id from input
+        source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
+        
+        # Return dictionary with all fields
+        return {
+            'source_job_id': source_job_id,
+            'title': title,
+            'location': location,
+            'department': department,
+            'raw_data': {
                 'description': description,
                 'detail_html': html_content,
                 # Preserve any existing raw data
-                **(job_listing.raw_data or {})
+                **(job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {}))
             }
-        )
+        }
     
     def prepare_scraping_config(self, url: str) -> dict:
         """
