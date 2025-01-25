@@ -378,33 +378,40 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
-    # Process listings for each source-listings pair
-    job_changes = process_listings.expand(
-        source=sources,
-        listings=listings,
-        zip=True  # Ensure one-to-one mapping between sources and their listings
-    )
+    # Create mapped parameters for process_listings
+    process_params = [
+        {
+            "source": source,
+            "listings": listing
+        }
+        for source, listing in zip(sources, listings)
+    ]
+    job_changes = process_listings.expand_kwargs(process_params)
     
-    # Handle new jobs for each source-changes-listings combination
-    detailed_jobs = handle_new_jobs.expand(
-        source=sources,
-        job_changes=job_changes,
-        listings=listings,
-        zip=True  # Maintain one-to-one mapping
-    )
+    # Create mapped parameters for handle_new_jobs
+    handle_jobs_params = [
+        {
+            "source": source,
+            "job_changes": changes,
+            "listings": listing
+        }
+        for source, changes, listing in zip(sources, job_changes, listings)
+    ]
+    detailed_jobs = handle_new_jobs.expand_kwargs(handle_jobs_params)
     
-    # Update database for each source-changes-jobs combination
-    database_updates = update_database.expand(
-        source=sources,
-        job_changes=job_changes,
-        listings=detailed_jobs,
-        zip=True  # Maintain one-to-one mapping
-    )
+    # Create mapped parameters for update_database
+    update_params = [
+        {
+            "source": source,
+            "job_changes": changes,
+            "listings": jobs
+        }
+        for source, changes, jobs in zip(sources, job_changes, detailed_jobs)
+    ]
+    database_updates = update_database.expand_kwargs(update_params)
     
     # Update scrape times for each source
-    scrape_time_updates = update_scrape_time.expand(
-        source=sources
-    )
+    scrape_time_updates = update_scrape_time.expand(source=sources)
     
     # Define task dependencies
     chain(
