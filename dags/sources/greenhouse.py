@@ -94,7 +94,7 @@ class GreenhouseSource(BaseSource):
                 continue
         return None
     
-    def _extract_job_data(self, element, implementation: str) -> Optional[Tuple[str, str, str, str, dict]]:
+    def _extract_job_data(self, element, implementation: str) -> Optional[Tuple[str, str, str, str, str, dict]]:
         """
         Extract job data from an element using appropriate selectors.
         
@@ -103,7 +103,7 @@ class GreenhouseSource(BaseSource):
             implementation: Which Greenhouse implementation was detected
             
         Returns:
-            Tuple of (job_id, title, location, department, raw_data) or None if extraction fails
+            Tuple of (job_id, job_url, title, location, department, raw_data) or None if extraction fails
         """
         try:
             # Get job link and ID
@@ -129,7 +129,7 @@ class GreenhouseSource(BaseSource):
                 'implementation': implementation
             }
             
-            return job_id, title, location, department, raw_data
+            return job_id, job_url, title, location, department, raw_data
             
         except (IndexError, AttributeError) as e:
             logging.debug(f"Failed to extract job data: {e}")
@@ -163,7 +163,7 @@ class GreenhouseSource(BaseSource):
                     if not job_data:
                         continue
                         
-                    job_id, title, location, department, raw_data = job_data
+                    job_id, job_url, title, location, department, raw_data = job_data
                     
                     listing = JobListing(
                         source_job_id=job_id,
