@@ -1,19 +1,19 @@
 # Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
 
 # Database
-psycopg2-binary>=2.9.9  # PostgreSQL adapter
+psycopg2-binary==2.9.9  # PostgreSQL adapter
 
 # HTTP and Scraping
-requests>=2.31.0  # For HTTP requests
-httpx>=0.25.2  # Modern HTTP client
-aiohttp>=3.9.1  # For async HTTP
-scrapingbee>=2.0.1  # Scraping service client
+requests==2.31.0  # For HTTP requests
+httpx==0.25.2  # Modern HTTP client
+aiohttp==3.9.1  # For async HTTP
+scrapingbee==2.0.1  # Scraping service client
 
 # HTML Processing
-beautifulsoup4>=4.12.2  # For HTML parsing
-lxml>=4.9.3  # For XML/HTML processing
+beautifulsoup4==4.12.2  # For HTML parsing
+lxml==4.9.3  # For XML/HTML processing
 
 # Settings and Config
-python-dotenv>=1.0.0  # For environment variables
-pydantic>=2.5.2  # For settings management
-pydantic-settings>=2.1.0  # For settings management with env vars
+python-dotenv==1.0.0  # For environment variables
+pydantic==2.5.2  # For settings management
+pydantic-settings==2.1.0  # For settings management with env vars
