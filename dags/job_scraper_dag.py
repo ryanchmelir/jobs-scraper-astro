@@ -378,22 +378,17 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
-    # Process listings for each source-listings pair
-    job_changes = process_listings.expand(
-        source=sources,
-        listings=listings
-    )
+    # Process listings for each source-listings pair using partial to maintain one-to-one mapping
+    job_changes = process_listings.partial(source=sources).expand(listings=listings)
     
     # Handle new jobs for each source-changes-listings combination
-    detailed_jobs = handle_new_jobs.expand(
-        source=sources,
+    detailed_jobs = handle_new_jobs.partial(source=sources).expand(
         job_changes=job_changes,
         listings=listings
     )
     
     # Update database for each source-changes-jobs combination
-    database_updates = update_database.expand(
-        source=sources,
+    database_updates = update_database.partial(source=sources).expand(
         job_changes=job_changes,
         listings=detailed_jobs
     )
@@ -401,15 +396,10 @@ def job_scraper_dag():
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Define task dependencies
-    chain(
-        sources,
-        listings,
-        job_changes,
-        detailed_jobs,
-        database_updates,
-        scrape_time_updates
-    )
+    # Set up parallel processing paths
+    # Each mapped task depends on its corresponding upstream task
+    for idx in range(len(sources)):
+        listings[idx] >> job_changes[idx] >> detailed_jobs[idx] >> database_updates[idx] >> scrape_time_updates[idx]
 
 # Instantiate the DAG
 job_scraper_dag()
