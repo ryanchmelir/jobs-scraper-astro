@@ -81,7 +81,7 @@ class GreenhouseSource(BaseSource):
     
     def get_listing_url(self, listing) -> str:
         """
-        Get the URL for a job listing, handling both JobListing objects and dictionaries.
+        Get the URL for a job listing.
         
         Args:
             listing: Either a JobListing object or a dictionary with job data
@@ -89,16 +89,12 @@ class GreenhouseSource(BaseSource):
         Returns:
             Full URL for the job listing
         """
-        # If it's already a JobListing object, use its URL
-        if isinstance(listing, JobListing):
-            return listing.url
-            
-        # If it's a dictionary, construct the URL
-        if isinstance(listing, dict):
-            job_id = listing.get('source_job_id') or listing.get('id')
-            if not job_id:
-                raise ValueError("Listing dictionary must have 'source_job_id' or 'id'")
-            return f"https://boards.greenhouse.io/jobs/{job_id}"
+        # If it's a JobListing object or dictionary, get the URL
+        if isinstance(listing, (JobListing, dict)):
+            try:
+                return listing.url if isinstance(listing, JobListing) else listing['url']
+            except (AttributeError, KeyError):
+                raise ValueError("Listing must have a 'url' field")
             
         raise TypeError(f"Expected JobListing or dict, got {type(listing)}")
         
