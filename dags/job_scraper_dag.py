@@ -295,11 +295,27 @@ def job_scraper_dag():
         
         # Insert new jobs
         if job_changes['new_jobs']:
-            # Convert job dictionaries to tuples matching the database schema
+            # Define target fields in exact database column order
+            target_fields = [
+                'company_id',
+                'title',
+                'location',
+                'department',
+                'description',
+                'raw_data',
+                'active',
+                'first_seen',
+                'last_seen',
+                'created_at',
+                'updated_at',
+                'company_source_id',
+                'source_job_id'
+            ]
+            
+            # Convert job dictionaries to tuples matching the target_fields order
             new_jobs = []
             for listing in listings:
                 if listing['source_job_id'] in job_changes['new_jobs']:
-                    # Create tuple with fields in exact database column order
                     job_tuple = (
                         source['company_id'],        # company_id
                         listing['title'],            # title
@@ -318,25 +334,7 @@ def job_scraper_dag():
                     new_jobs.append(job_tuple)
             
             if new_jobs:  # Only attempt insert if we have jobs to insert
-                sql = """
-                    INSERT INTO jobs (
-                        company_id,
-                        title,
-                        location,
-                        department,
-                        description,
-                        raw_data,
-                        active,
-                        first_seen,
-                        last_seen,
-                        created_at,
-                        updated_at,
-                        company_source_id,
-                        source_job_id
-                    )
-                    VALUES %s
-                """
-                pg_hook.insert_rows('jobs', new_jobs)
+                pg_hook.insert_rows('jobs', new_jobs, target_fields=target_fields)
 
     @task
     def update_scrape_time(source: Dict) -> None:
