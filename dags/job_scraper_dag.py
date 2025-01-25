@@ -170,7 +170,7 @@ def job_scraper_dag():
         
         # Create sets for comparison
         existing_job_ids = {job[0] for job in existing_jobs}
-        scraped_job_ids = {listing['id'] for listing in listings}
+        scraped_job_ids = {listing['source_job_id'] for listing in listings}  # Use source_job_id consistently
         
         # Identify changes
         new_jobs = scraped_job_ids - existing_job_ids
@@ -299,43 +299,44 @@ def job_scraper_dag():
             new_jobs = []
             for listing in listings:
                 if listing['source_job_id'] in job_changes['new_jobs']:
-                    # Create tuple with fields in the same order as the INSERT statement
+                    # Create tuple with fields in exact database column order
                     job_tuple = (
                         source['company_id'],        # company_id
-                        source['id'],                # company_source_id
-                        listing['source_job_id'],    # source_job_id
                         listing['title'],            # title
-                        listing['location'],         # location
-                        listing['department'],       # department
-                        listing['description'],      # description
-                        listing['raw_data'],         # raw_data (JSON)
-                        listing['active'],           # active
-                        listing['first_seen'],       # first_seen
-                        listing['last_seen'],        # last_seen
-                        listing['created_at'],       # created_at
-                        listing['updated_at']        # updated_at
+                        listing.get('location'),     # location
+                        listing.get('department'),   # department
+                        listing.get('description'),  # description
+                        pg_hook.get_connection('postgres_jobs_db').extra_dejson.get('json_serializer', 'json')(listing.get('raw_data', {})),  # raw_data
+                        True,                        # active
+                        now,                         # first_seen
+                        now,                         # last_seen
+                        now,                         # created_at
+                        now,                         # updated_at
+                        source['id'],                # company_source_id
+                        listing['source_job_id']     # source_job_id
                     )
                     new_jobs.append(job_tuple)
             
-            sql = """
-                INSERT INTO jobs (
-                    company_id,
-                    company_source_id,
-                    source_job_id,
-                    title,
-                    location,
-                    department,
-                    description,
-                    raw_data,
-                    active,
-                    first_seen,
-                    last_seen,
-                    created_at,
-                    updated_at
-                )
-                VALUES %s
-            """
-            pg_hook.insert_rows('jobs', new_jobs)
+            if new_jobs:  # Only attempt insert if we have jobs to insert
+                sql = """
+                    INSERT INTO jobs (
+                        company_id,
+                        title,
+                        location,
+                        department,
+                        description,
+                        raw_data,
+                        active,
+                        first_seen,
+                        last_seen,
+                        created_at,
+                        updated_at,
+                        company_source_id,
+                        source_job_id
+                    )
+                    VALUES %s
+                """
+                pg_hook.insert_rows('jobs', new_jobs)
 
     @task
     def update_scrape_time(source: Dict) -> None:

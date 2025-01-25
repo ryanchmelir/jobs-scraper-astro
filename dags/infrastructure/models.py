@@ -48,29 +48,40 @@ class Company(Base):
         return f"<Company(name='{self.name}')>"
 
 class Job(Base):
+    """
+    Represents a job listing in the database.
+    Column order matches the actual database structure.
+    """
     __tablename__ = 'jobs'
 
+    # Primary key
     id = Column(Integer, primary_key=True)
+    
+    # Foreign keys and basic info (matches DB order)
     company_id = Column(Integer, ForeignKey('companies.id'), nullable=False)
-    company_source_id = Column(Integer, ForeignKey('company_sources.id'), nullable=False)
-    source_job_id = Column(String(255), nullable=False)  # The job ID from the source
     title = Column(String(255), nullable=False)
     location = Column(String(255))
     department = Column(String(255))
     description = Column(Text)
-    raw_data = Column(JSON)  # Store the complete raw data from scraping
+    raw_data = Column(JSON)
     active = Column(Boolean, default=True)
-    first_seen = Column(DateTime, default=datetime.utcnow)
-    last_seen = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
+    
+    # Temporal fields
+    first_seen = Column(DateTime, nullable=False)
+    last_seen = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+    
+    # Source tracking (added in later migration)
+    company_source_id = Column(Integer, ForeignKey('company_sources.id'), nullable=False)
+    source_job_id = Column(String(255), nullable=False)
+    
     # Relationships
-    company = relationship("Company", back_populates="jobs")
-    company_source = relationship("CompanySource", back_populates="jobs")
+    company = relationship('Company', back_populates='jobs')
+    company_source = relationship('CompanySource', back_populates='jobs')
 
     __table_args__ = (
-        sa.UniqueConstraint('company_source_id', 'source_job_id', name='uix_source_job'),
+        sa.UniqueConstraint('company_source_id', 'source_job_id', name='unique_job_per_source'),
     )
 
     def __repr__(self):
