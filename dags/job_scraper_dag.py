@@ -264,31 +264,44 @@ def job_scraper_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
-        # Mark removed jobs as inactive
-        if job_changes['removed_jobs']:
-            sql = """
-                UPDATE jobs 
-                SET active = false, last_seen = %(now)s
-                WHERE company_source_id = %(source_id)s
-                AND source_job_id = ANY(%(job_ids)s)
-            """
-            pg_hook.run(sql, parameters={
-                'source_id': source['id'],
-                'job_ids': job_changes['removed_jobs'],
-                'now': now
-            })
+        # Define stale threshold - jobs not seen for this long will be marked inactive
+        STALE_THRESHOLD = timedelta(days=7)  # Configurable, adjust as needed
         
-        # Update last_seen for existing jobs
-        if job_changes['existing_jobs']:
+        # Mark jobs as inactive if they haven't been seen recently and aren't in current scrape
+        sql = """
+            UPDATE jobs 
+            SET active = false, 
+                updated_at = %(now)s  -- Only update the status change timestamp
+            WHERE company_source_id = %(source_id)s
+            AND active = true  -- Only update currently active jobs
+            AND source_job_id != ALL(%(current_job_ids)s)  -- Not in current scrape
+            AND (%(now)s - last_seen) > %(stale_threshold)s  -- Haven't been seen recently
+        """
+        
+        current_job_ids = [listing['source_job_id'] for listing in listings]
+        
+        result = pg_hook.run(sql, parameters={
+            'source_id': source['id'],
+            'current_job_ids': current_job_ids,
+            'now': now,
+            'stale_threshold': STALE_THRESHOLD
+        })
+        
+        if result:
+            logging.info(f"Marked jobs as inactive for source {source['id']} that haven't been seen for {STALE_THRESHOLD.days} days")
+        
+        # Update last_seen for jobs that still exist
+        if current_job_ids:
             sql = """
                 UPDATE jobs 
-                SET last_seen = %(now)s
+                SET last_seen = %(now)s,
+                    updated_at = %(now)s
                 WHERE company_source_id = %(source_id)s
                 AND source_job_id = ANY(%(job_ids)s)
             """
             pg_hook.run(sql, parameters={
                 'source_id': source['id'],
-                'job_ids': job_changes['existing_jobs'],
+                'job_ids': current_job_ids,
                 'now': now
             })
         
