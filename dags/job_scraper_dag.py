@@ -151,7 +151,7 @@ def job_scraper_dag():
         
         Args:
             source: Company source record.
-            listings: List of job listings from the scrape.
+            listings: List of job listings from the scrape (as dictionaries).
             
         Returns:
             Dictionary with lists of job IDs for new, existing, and removed jobs.
@@ -194,10 +194,10 @@ def job_scraper_dag():
         Args:
             source: Company source record.
             job_changes: Dictionary with new, removed, and existing job IDs.
-            listings: Original listings data.
+            listings: Original listings data as dictionaries.
             
         Returns:
-            List of job listings with full details.
+            List of job listings with full details as dictionaries.
         """
         if not job_changes['new_jobs']:
             logging.info(f"No new jobs to process for source {source['id']}")
@@ -240,6 +240,14 @@ def job_scraper_dag():
                     
                     # Parse job details and merge with listing data
                     job_details = source_handler.parse_job_details(response.text, listing)
+                    # Ensure job_details is a dictionary
+                    if not isinstance(job_details, dict):
+                        job_details = {
+                            'description': job_details.description if hasattr(job_details, 'description') else None,
+                            'requirements': job_details.requirements if hasattr(job_details, 'requirements') else None,
+                            'benefits': job_details.benefits if hasattr(job_details, 'benefits') else None,
+                            'additional_fields': job_details.additional_fields if hasattr(job_details, 'additional_fields') else {}
+                        }
                     detailed_job = {**listing, **job_details}
                     detailed_jobs.append(detailed_job)
                     
