@@ -5,6 +5,7 @@ Uses ScrapingBee for fetching pages and lxml for parsing.
 from typing import List
 from lxml import html
 import random
+from datetime import datetime
 
 from .base import BaseSource, JobListing
 
@@ -117,13 +118,13 @@ class GreenhouseSource(BaseSource):
             job_listing: The existing job listing with basic info (dict or JobListing)
             
         Returns:
-            Dictionary with full job details
+            Dictionary matching Job model schema with parsed details
         """
         tree = html.fromstring(html_content)
         
         # Extract core fields
-        title = tree.xpath('//h1[@class="app-title"]/text()')[0].strip()
-        location = tree.xpath('//div[@class="location"]/text()')[0].strip()
+        title = tree.xpath('//h1[@class="app-title"]/text()')[0].strip()[:255]  # Match String(255)
+        location = tree.xpath('//div[@class="location"]/text()')[0].strip()[:255]
         
         # Get main content
         content_div = tree.xpath('//div[@id="content"]')[0]
@@ -132,7 +133,7 @@ class GreenhouseSource(BaseSource):
         department = None
         department_elements = content_div.xpath('.//strong[contains(text(), "Department")]')
         if department_elements:
-            department = department_elements[0].getnext().text.strip()
+            department = department_elements[0].getnext().text.strip()[:255]
         
         # Extract clean text content from sections
         description_text = []
@@ -145,6 +146,7 @@ class GreenhouseSource(BaseSource):
         
         # Get source_job_id from input
         source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
+        source_job_id = str(source_job_id)[:255]  # Ensure string and length
         
         # Get existing raw data while preserving non-HTML fields
         existing_raw_data = job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {})
@@ -153,16 +155,24 @@ class GreenhouseSource(BaseSource):
             if k not in ('html', 'detail_html')  # Exclude HTML fields
         }
         
-        # Return dictionary with all fields
+        # Add any additional structured data to raw_data
+        raw_data.update({
+            'departments': raw_data.get('departments', []),
+            'office_ids': raw_data.get('office_ids', []),
+            'metadata': {
+                'scraped_at': datetime.utcnow().isoformat(),
+                'source': 'greenhouse'
+            }
+        })
+        
+        # Return dictionary matching Job model schema
         return {
             'source_job_id': source_job_id,
             'title': title,
             'location': location,
             'department': department,
-            'raw_data': {
-                'description': '\n'.join(description_text),  # Clean text content
-                **raw_data  # Include only non-HTML raw data
-            }
+            'description': '\n'.join(description_text),  # Store as top-level field
+            'raw_data': raw_data  # JSON-serializable dict without HTML
         }
     
     def prepare_scraping_config(self, url: str) -> dict:
