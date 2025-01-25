@@ -378,20 +378,32 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
+    # Create kwargs list for process_listings
+    process_kwargs = [
+        {"source": source, "listings": listing}
+        for source, listing in zip(sources, listings)
+    ]
+    
     # Process listings for each source-listings pair
-    job_changes = process_listings.expand(
-        source=sources.zip(listings)
-    )
+    job_changes = process_listings.expand_kwargs(process_kwargs)
+    
+    # Create kwargs list for handle_new_jobs
+    handle_kwargs = [
+        {"source": source, "job_changes": changes, "listings": listing}
+        for source, changes, listing in zip(sources, job_changes, listings)
+    ]
     
     # Handle new jobs for each source-changes-listings combination
-    detailed_jobs = handle_new_jobs.expand(
-        source=sources.zip(job_changes, listings)
-    )
+    detailed_jobs = handle_new_jobs.expand_kwargs(handle_kwargs)
+    
+    # Create kwargs list for update_database
+    update_kwargs = [
+        {"source": source, "job_changes": changes, "listings": jobs}
+        for source, changes, jobs in zip(sources, job_changes, detailed_jobs)
+    ]
     
     # Update database for each source-changes-jobs combination
-    database_updates = update_database.expand(
-        source=sources.zip(job_changes, detailed_jobs)
-    )
+    database_updates = update_database.expand_kwargs(update_kwargs)
     
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
