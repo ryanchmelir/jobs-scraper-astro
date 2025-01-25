@@ -146,17 +146,17 @@ def job_scraper_dag():
             raise
 
     @task
-    def process_listings(source: Dict, listings: List[Dict]) -> Dict[str, List[str]]:
+    def process_listings(source_and_listings) -> Dict[str, List[str]]:
         """
         Processes scraped listings to identify new, existing, and removed jobs.
         
         Args:
-            source: Company source record.
-            listings: List of job listings from the scrape (as dictionaries).
+            source_and_listings: Tuple of (source, listings) from upstream tasks.
             
         Returns:
             Dictionary with lists of job IDs for new, existing, and removed jobs.
         """
+        source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         # Get existing active jobs for this source
@@ -188,18 +188,18 @@ def job_scraper_dag():
         }
 
     @task
-    def handle_new_jobs(source: Dict, job_changes: Dict[str, List[str]], listings: List[Dict]) -> List[Dict]:
+    def handle_new_jobs(source_changes_and_listings) -> List[Dict]:
         """
         Scrapes details for new jobs and prepares them for database insertion.
         
         Args:
-            source: Company source record.
-            job_changes: Dictionary with new, removed, and existing job IDs.
-            listings: Original listings data as dictionaries.
+            source_changes_and_listings: Tuple of (source, job_changes, listings) from upstream tasks.
             
         Returns:
             List of job listings with full details as dictionaries.
         """
+        source, job_changes, listings = source_changes_and_listings
+        
         if not job_changes['new_jobs']:
             logging.info(f"No new jobs to process for source {source['id']}")
             return []
@@ -253,15 +253,14 @@ def job_scraper_dag():
         return detailed_jobs
 
     @task
-    def update_database(source: Dict, job_changes: Dict[str, List[str]], listings: List[Dict]) -> None:
+    def update_database(source_changes_and_jobs) -> None:
         """
         Updates the database with job changes.
         
         Args:
-            source: Company source record.
-            job_changes: Dictionary with new, removed, and existing job IDs.
-            listings: Job listings with full details as dictionaries.
+            source_changes_and_jobs: Tuple of (source, job_changes, listings) from upstream tasks.
         """
+        source, job_changes, listings = source_changes_and_jobs
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
@@ -378,32 +377,20 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
-    # Create kwargs list for process_listings
-    process_kwargs = [
-        {"source": source, "listings": listing}
-        for source, listing in zip(sources, listings)
-    ]
-    
     # Process listings for each source-listings pair
-    job_changes = process_listings.expand_kwargs(process_kwargs)
-    
-    # Create kwargs list for handle_new_jobs
-    handle_kwargs = [
-        {"source": source, "job_changes": changes, "listings": listing}
-        for source, changes, listing in zip(sources, job_changes, listings)
-    ]
+    job_changes = process_listings.expand(
+        source_and_listings=sources.zip(listings)
+    )
     
     # Handle new jobs for each source-changes-listings combination
-    detailed_jobs = handle_new_jobs.expand_kwargs(handle_kwargs)
-    
-    # Create kwargs list for update_database
-    update_kwargs = [
-        {"source": source, "job_changes": changes, "listings": jobs}
-        for source, changes, jobs in zip(sources, job_changes, detailed_jobs)
-    ]
+    detailed_jobs = handle_new_jobs.expand(
+        source_changes_and_listings=sources.zip(job_changes, listings)
+    )
     
     # Update database for each source-changes-jobs combination
-    database_updates = update_database.expand_kwargs(update_kwargs)
+    database_updates = update_database.expand(
+        source_changes_and_jobs=sources.zip(job_changes, detailed_jobs)
+    )
     
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
