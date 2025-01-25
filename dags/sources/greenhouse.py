@@ -155,9 +155,8 @@ class GreenhouseSource(BaseSource):
     def prepare_scraping_config(self, url: str) -> dict:
         """
         Prepare configuration for ScrapingBee API with Greenhouse-specific settings.
-        Optimized for raw HTML fetching since Greenhouse serves complete HTML without JS.
-        Starting with basic proxy to minimize costs (1 credit/request).
-        Can enable premium_proxy later if we see too many failures.
+        Inherits base configuration optimized for minimal API credit usage.
+        Adds Greenhouse-specific wait_for selectors based on URL type.
         
         Args:
             url: The URL to be scraped
@@ -165,17 +164,13 @@ class GreenhouseSource(BaseSource):
         Returns:
             Dictionary of parameters for ScrapingBee
         """
-        config = {
-            'api_key': SCRAPING_BEE_API_KEY,
-            'url': url,
-            'render_js': False,  # Greenhouse serves complete HTML
-            'country_code': 'us',  # Use US proxy to avoid region blocks
-            'block_resources': True,  # Block images/CSS to speed up
-            'timeout': 20000,  # 20 second timeout
-            'transparent_status_code': True,  # Get actual status codes
-        }
+        # Get base configuration
+        config = super().prepare_scraping_config(url)
         
-        # Add specific wait_for based on URL
+        # Add API key
+        config['api_key'] = SCRAPING_BEE_API_KEY
+        
+        # Add specific wait_for based on URL type
         if url.count('/') == 3:  # Main listings page
             config['wait_for'] = '//div[contains(@class, "opening")]'
         else:  # Job detail page

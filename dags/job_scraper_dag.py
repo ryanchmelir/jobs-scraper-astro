@@ -224,19 +224,11 @@ def job_scraper_dag():
                 # Get job detail URL
                 detail_url = source_handler.get_job_detail_url(listing)
                 
-                # Prepare ScrapingBee request
-                params = {
-                    'api_key': SCRAPING_BEE_API_KEY,
-                    'url': detail_url,
-                    'wait': 'domcontentloaded',
-                    'premium_proxy': 'true',
-                    **source_handler.prepare_scraping_config(detail_url)
-                }
-                
                 # Make the request
                 logging.info(f"Scraping job details from {detail_url}")
                 with httpx.Client(timeout=30.0) as client:
-                    response = client.get('https://app.scrapingbee.com/api/v1/', params=params)
+                    response = client.get('https://app.scrapingbee.com/api/v1/', 
+                                       params=source_handler.prepare_scraping_config(detail_url))
                     response.raise_for_status()
                     
                     # Parse job details and merge with listing data

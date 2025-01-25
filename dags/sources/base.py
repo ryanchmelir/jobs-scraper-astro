@@ -86,6 +86,7 @@ class BaseSource(ABC):
     def prepare_scraping_config(self, url: str) -> Dict:
         """
         Prepare configuration for ScrapingBee API.
+        Uses minimal settings by default to save API credits.
         Can be overridden by sources if needed.
         
         Args:
@@ -96,6 +97,9 @@ class BaseSource(ABC):
         """
         return {
             'url': url,
-            'render_js': True,  # Most modern job boards use JavaScript
-            'premium_proxy': True,  # Avoid blocks
+            'render_js': False,  # Default to raw HTML to save credits
+            'block_resources': True,  # Block images/CSS to save bandwidth
+            'country_code': 'us',  # Use US proxy to avoid region blocks
+            'timeout': 20000,  # 20 second timeout
+            'transparent_status_code': True  # Get actual status codes
         } 
