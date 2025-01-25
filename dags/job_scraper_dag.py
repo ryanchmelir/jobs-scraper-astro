@@ -306,7 +306,7 @@ def job_scraper_dag():
                         listing.get('location'),     # location
                         listing.get('department'),   # department
                         listing.get('description'),  # description
-                        listing.get('raw_data', {}), # raw_data (PostgresHook handles JSON conversion)
+                        None,                        # raw_data set to None
                         True,                        # active
                         now,                         # first_seen
                         now,                         # last_seen

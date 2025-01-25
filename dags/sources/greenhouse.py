@@ -2,7 +2,7 @@
 Greenhouse job board source implementation.
 Uses ScrapingBee for fetching pages and lxml for parsing.
 """
-from typing import List
+from typing import List, Union
 from lxml import html
 import random
 from datetime import datetime
@@ -54,9 +54,8 @@ class GreenhouseSource(BaseSource):
                 # Get location
                 location = opening.xpath('.//span[@class="location"]/text()')[0].strip()
                 
-                # Get departments from the department_id attribute
-                departments = opening.get('department_id', '').split(',')
-                department = departments[0] if departments else None
+                # Get department
+                department = opening.xpath('.//span[@class="department"]/text()')[0].strip()
                 
                 # Create listing object
                 listing = JobListing(
@@ -64,11 +63,7 @@ class GreenhouseSource(BaseSource):
                     title=title,
                     location=location,
                     department=department,
-                    url=f"https://boards.greenhouse.io{job_url}",
-                    raw_data={
-                        'departments': departments,
-                        'office_ids': opening.get('office_id', '').split(',')
-                    }
+                    url=f"https://boards.greenhouse.io{job_url}"
                 )
                 listings.append(listing)
                 
@@ -76,7 +71,7 @@ class GreenhouseSource(BaseSource):
                 # Log error but continue processing other listings
                 print(f"Error parsing job listing: {e}")
                 continue
-                
+        
         return listings
     
     def get_listing_url(self, listing) -> str:
@@ -110,7 +105,7 @@ class GreenhouseSource(BaseSource):
         """
         return self.get_listing_url(listing)
     
-    def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
+    def parse_job_details(self, html_content: str, job_listing: Union[JobListing, dict]) -> dict:
         """Parse the job detail page HTML and update the job listing with full details.
         
         Args:
@@ -148,23 +143,6 @@ class GreenhouseSource(BaseSource):
         source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
         source_job_id = str(source_job_id)[:255]  # Ensure string and length
         
-        # Get existing raw data while preserving non-HTML fields
-        existing_raw_data = job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {})
-        raw_data = {
-            k: v for k, v in existing_raw_data.items() 
-            if k not in ('html', 'detail_html')  # Exclude HTML fields
-        }
-        
-        # Add any additional structured data to raw_data
-        raw_data.update({
-            'departments': raw_data.get('departments', []),
-            'office_ids': raw_data.get('office_ids', []),
-            'metadata': {
-                'scraped_at': datetime.utcnow().isoformat(),
-                'source': 'greenhouse'
-            }
-        })
-        
         # Get current timestamp for temporal fields
         now = datetime.utcnow()
         
@@ -175,17 +153,7 @@ class GreenhouseSource(BaseSource):
             'title': title,
             'location': location,
             'department': department,
-            'description': '\n'.join(description_text),
-            'raw_data': raw_data,
-            
-            # Default fields
-            'active': True,
-            'first_seen': now,
-            'last_seen': now,
-            'created_at': now,
-            'updated_at': now
-            
-            # Note: company_id and company_source_id will be added by the DAG
+            'description': '\n'.join(description_text)
         }
     
     def prepare_scraping_config(self, url: str) -> dict:
