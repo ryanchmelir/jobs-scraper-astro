@@ -3,7 +3,8 @@ Environment settings and configuration for the job scraper.
 Uses Airflow connections and variables for deployment-specific settings.
 """
 from typing import Optional
-from pydantic import BaseSettings, PostgresDsn
+from pydantic import PostgresDsn
+from pydantic_settings import BaseSettings
 from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 import logging
@@ -23,6 +24,10 @@ class Settings(BaseSettings):
     
     # Database (from Airflow connection)
     POSTGRES_DSN: Optional[PostgresDsn] = None
+
+    model_config = {
+        "case_sensitive": True
+    }
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -44,9 +49,6 @@ class Settings(BaseSettings):
         except Exception as e:
             logger.error(f"Error getting database connection: {str(e)}")
             raise ValueError("Database connection 'postgres_jobs_db' not found or invalid")
-    
-    class Config:
-        case_sensitive = True
 
 def get_settings() -> Settings:
     """
@@ -60,4 +62,7 @@ def get_settings() -> Settings:
         raise
 
 # Global settings instance
-settings = get_settings() 
+settings = get_settings()
+
+# Export commonly used settings
+SCRAPING_BEE_API_KEY = settings.SCRAPING_BEE_API_KEY 

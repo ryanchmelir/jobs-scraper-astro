@@ -92,32 +92,46 @@ class GreenhouseSource(BaseSource):
         return job_listing.url
     
     def parse_job_details(self, html_content: str, job_listing: JobListing) -> JobListing:
-        """
-        Parse the job detail page HTML and update the JobListing.
+        """Parse the job detail page HTML and update the job listing with full details.
         
         Args:
-            html_content: Raw HTML from ScrapingBee
-            job_listing: Existing JobListing to update with details
+            html_content: The HTML content of the job detail page
+            job_listing: The existing job listing with basic info
             
         Returns:
             Updated JobListing with full details
         """
         tree = html.fromstring(html_content)
         
-        try:
-            # Get job content
-            content = tree.xpath('//div[@id="content"]')[0]
-            
-            # Update raw data with full job details
-            job_listing.raw_data.update({
-                'full_description': html.tostring(content).decode('utf-8'),
-                'detail_html': html_content
-            })
-            
-        except (IndexError, AttributeError) as e:
-            print(f"Error parsing job details: {e}")
-            
-        return job_listing
+        # Extract core fields
+        title = tree.xpath('//h1[@class="app-title"]/text()')[0].strip()
+        location = tree.xpath('//div[@class="location"]/text()')[0].strip()
+        
+        # Get main content
+        content_div = tree.xpath('//div[@id="content"]')[0]
+        
+        # Try to extract department from content structure
+        department = None
+        department_elements = content_div.xpath('.//strong[contains(text(), "Department")]')
+        if department_elements:
+            department = department_elements[0].getnext().text.strip()
+        
+        # Get full description
+        description = html.tostring(content_div, encoding='unicode')
+        
+        # Create new job listing with updated fields
+        return JobListing(
+            source_job_id=job_listing.source_job_id,
+            title=title,
+            location=location,
+            department=department,
+            raw_data={
+                'description': description,
+                'detail_html': html_content,
+                # Preserve any existing raw data
+                **(job_listing.raw_data or {})
+            }
+        )
     
     def prepare_scraping_config(self, url: str) -> dict:
         """

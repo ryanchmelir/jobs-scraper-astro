@@ -4,18 +4,25 @@ All source implementations must inherit from BaseSource.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
-@dataclass
+@dataclass(frozen=True)
 class JobListing:
-    """Represents a job listing from any source."""
+    """
+    Represents a job listing from any source.
+    Immutable and hashable for safe use in sets and as dict keys.
+    """
     source_job_id: str
     title: str
     location: Optional[str] = None
     department: Optional[str] = None
     url: Optional[str] = None
-    raw_data: Optional[Dict] = None
+    raw_data: Optional[Dict] = field(default=None, compare=False)  # Exclude from equality
+
+    def __hash__(self):
+        """Hash based on source_job_id which is unique."""
+        return hash(self.source_job_id)
 
 class BaseSource(ABC):
     """
