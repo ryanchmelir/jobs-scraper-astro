@@ -408,16 +408,15 @@ def job_scraper_dag():
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Create individual dependencies for each company's pipeline
-    # This allows each company's tasks to proceed independently
-    for i in range(len(sources)):
-        chain(
-            listings[i],
-            job_changes[i],
-            detailed_jobs[i],
-            database_updates[i],
-            scrape_time_updates[i]
-        )
+    # Set up dependencies between mapped tasks
+    # Each mapped instance will maintain its own chain
+    chain(
+        listings,
+        job_changes,
+        detailed_jobs,
+        database_updates,
+        scrape_time_updates
+    )
 
 # Instantiate the DAG
 job_scraper_dag()
