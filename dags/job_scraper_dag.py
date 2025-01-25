@@ -114,20 +114,11 @@ def job_scraper_dag():
         listings_url = source_handler.get_listings_url(source['source_id'])
         scraping_config = source_handler.prepare_scraping_config(listings_url)
         
-        # Prepare ScrapingBee request
-        params = {
-            'api_key': SCRAPING_BEE_API_KEY,
-            'url': listings_url,
-            'wait': 'domcontentloaded',
-            'premium_proxy': 'true',
-            **scraping_config
-        }
-        
         try:
             # Make the request to ScrapingBee
             logging.info(f"Scraping listings from {listings_url}")
             with httpx.Client(timeout=30.0) as client:
-                response = client.get('https://app.scrapingbee.com/api/v1/', params=params)
+                response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 response.raise_for_status()
                 
                 # Parse the listings page
