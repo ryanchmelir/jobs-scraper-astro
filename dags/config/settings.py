@@ -36,8 +36,9 @@ class Settings(BaseSettings):
     def _init_postgres_dsn(self):
         """Initialize PostgreSQL DSN from Airflow connection."""
         try:
+            logger.info("Attempting to get postgres_jobs_db connection")
             conn = BaseHook.get_connection("postgres_jobs_db")
-            logger.info(f"Building DSN with host={conn.host}, schema={conn.schema}")
+            logger.info(f"Connection details: host={conn.host}, port={conn.port}, schema={conn.schema}, extras={conn.extra_dejson}")
             
             # Build DSN from connection parts, handling schema correctly
             dsn_parts = {
@@ -47,21 +48,27 @@ class Settings(BaseSettings):
                 "host": conn.host,
                 "port": int(conn.port) if conn.port else 5432,
             }
+            logger.info(f"Built initial DSN parts: {dsn_parts}")
             
             # Only add schema if it exists, without leading slash
             if conn.schema:
                 dsn_parts["path"] = conn.schema
+                logger.info(f"Added schema to path: {conn.schema}")
             
             # Add SSL mode if specified in extras
             if conn.extra_dejson.get("sslmode"):
                 dsn_parts["query"] = f"sslmode={conn.extra_dejson['sslmode']}"
+                logger.info(f"Added SSL mode to query: {dsn_parts['query']}")
             
+            logger.info(f"Final DSN parts before build: {dsn_parts}")
             self.POSTGRES_DSN = PostgresDsn.build(**dsn_parts)
-            logger.info("Successfully built PostgreSQL DSN")
+            logger.info(f"Successfully built PostgreSQL DSN: {self.POSTGRES_DSN}")
             
         except Exception as e:
             logger.error(f"Error getting database connection: {str(e)}")
-            raise ValueError("Database connection 'postgres_jobs_db' not found or invalid")
+            logger.error(f"Error type: {type(e)}")
+            logger.error(f"Error args: {e.args}")
+            raise ValueError(f"Database connection 'postgres_jobs_db' not found or invalid: {str(e)}")
 
 def get_settings() -> Settings:
     """
