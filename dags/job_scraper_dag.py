@@ -408,12 +408,16 @@ def job_scraper_dag():
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Set up parallel processing paths using cross_downstream
-    # This ensures each company's pipeline runs independently
-    cross_downstream([listings], [job_changes])
-    cross_downstream([job_changes], [detailed_jobs])
-    cross_downstream([detailed_jobs], [database_updates])
-    cross_downstream([database_updates], [scrape_time_updates])
+    # Create individual dependencies for each company's pipeline
+    # This allows each company's tasks to proceed independently
+    for i in range(len(sources)):
+        chain(
+            listings[i],
+            job_changes[i],
+            detailed_jobs[i],
+            database_updates[i],
+            scrape_time_updates[i]
+        )
 
 # Instantiate the DAG
 job_scraper_dag()
