@@ -12,3 +12,4 @@ airflow.db
 dag_architecture.md
 plan.md
 scrapingbee.md
+issue.md

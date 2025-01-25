@@ -378,27 +378,30 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
-    # Process listings for each source
+    # Process listings for each source-listings pair
     job_changes = process_listings.expand(
         source=sources,
-        listings=listings
+        listings=listings,
+        zip=True  # Ensure one-to-one mapping between sources and their listings
     )
     
-    # Handle new jobs (scrape details)
+    # Handle new jobs for each source-changes-listings combination
     detailed_jobs = handle_new_jobs.expand(
         source=sources,
         job_changes=job_changes,
-        listings=listings
+        listings=listings,
+        zip=True  # Maintain one-to-one mapping
     )
     
-    # Update database for each source
+    # Update database for each source-changes-jobs combination
     database_updates = update_database.expand(
         source=sources,
         job_changes=job_changes,
-        listings=detailed_jobs
+        listings=detailed_jobs,
+        zip=True  # Maintain one-to-one mapping
     )
     
-    # Update scrape times
+    # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(
         source=sources
     )
