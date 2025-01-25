@@ -18,7 +18,7 @@ import httpx
 import logging
 
 from airflow.decorators import dag, task
-from airflow.models.baseoperator import chain
+from airflow.models.baseoperator import chain, cross_downstream
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from config.settings import SCRAPING_BEE_API_KEY
 from infrastructure.models import SourceType
@@ -396,10 +396,8 @@ def job_scraper_dag():
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Set up parallel processing paths
-    # Each mapped task depends on its corresponding upstream task
-    for idx in range(len(sources)):
-        listings[idx] >> job_changes[idx] >> detailed_jobs[idx] >> database_updates[idx] >> scrape_time_updates[idx]
+    # Set up parallel processing paths using cross_downstream
+    cross_downstream([listings, job_changes, detailed_jobs, database_updates, scrape_time_updates])
 
 # Instantiate the DAG
 job_scraper_dag()
