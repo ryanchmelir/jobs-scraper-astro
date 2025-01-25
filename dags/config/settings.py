@@ -37,15 +37,28 @@ class Settings(BaseSettings):
         """Initialize PostgreSQL DSN from Airflow connection."""
         try:
             conn = BaseHook.get_connection("postgres_jobs_db")
-            # Build DSN from connection parts
-            self.POSTGRES_DSN = PostgresDsn.build(
-                scheme="postgresql",
-                username=conn.login,
-                password=conn.password,
-                host=conn.host,
-                port=int(conn.port) if conn.port else 5432,
-                path=f"/{conn.schema}" if conn.schema else ""
-            )
+            logger.info(f"Building DSN with host={conn.host}, schema={conn.schema}")
+            
+            # Build DSN from connection parts, handling schema correctly
+            dsn_parts = {
+                "scheme": "postgresql",
+                "username": conn.login,
+                "password": conn.password,
+                "host": conn.host,
+                "port": int(conn.port) if conn.port else 5432,
+            }
+            
+            # Only add schema if it exists, without leading slash
+            if conn.schema:
+                dsn_parts["path"] = conn.schema
+            
+            # Add SSL mode if specified in extras
+            if conn.extra_dejson.get("sslmode"):
+                dsn_parts["query"] = {"sslmode": conn.extra_dejson["sslmode"]}
+            
+            self.POSTGRES_DSN = PostgresDsn.build(**dsn_parts)
+            logger.info("Successfully built PostgreSQL DSN")
+            
         except Exception as e:
             logger.error(f"Error getting database connection: {str(e)}")
             raise ValueError("Database connection 'postgres_jobs_db' not found or invalid")
@@ -65,4 +78,9 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 # Export commonly used settings
-SCRAPING_BEE_API_KEY = settings.SCRAPING_BEE_API_KEY 
+SCRAPING_BEE_API_KEY = settings.SCRAPING_BEE_API_KEY
+
+def get_db_engine():
+    """Get SQLAlchemy engine for database access."""
+    from sqlalchemy import create_engine
+    return create_engine(str(settings.POSTGRES_DSN)) 
