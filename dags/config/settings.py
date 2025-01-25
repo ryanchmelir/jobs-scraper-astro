@@ -54,7 +54,7 @@ class Settings(BaseSettings):
             
             # Add SSL mode if specified in extras
             if conn.extra_dejson.get("sslmode"):
-                dsn_parts["query"] = {"sslmode": conn.extra_dejson["sslmode"]}
+                dsn_parts["query"] = f"sslmode={conn.extra_dejson['sslmode']}"
             
             self.POSTGRES_DSN = PostgresDsn.build(**dsn_parts)
             logger.info("Successfully built PostgreSQL DSN")
