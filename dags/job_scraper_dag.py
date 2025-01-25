@@ -396,8 +396,11 @@ def job_scraper_dag():
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Set up parallel processing paths using cross_downstream
-    cross_downstream([listings, job_changes, detailed_jobs, database_updates, scrape_time_updates])
+    # Set up parallel processing paths using cross_downstream for each layer
+    cross_downstream([listings], [job_changes])
+    cross_downstream([job_changes], [detailed_jobs])
+    cross_downstream([detailed_jobs], [database_updates])
+    cross_downstream([database_updates], [scrape_time_updates])
 
 # Instantiate the DAG
 job_scraper_dag()
