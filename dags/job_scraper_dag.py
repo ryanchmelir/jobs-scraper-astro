@@ -32,7 +32,6 @@ default_args = {
     'retries': 3,
     'retry_delay': timedelta(minutes=5),
     'execution_timeout': timedelta(minutes=30),
-    'max_active_runs': 1,
     'email_on_failure': True,
     'email_on_retry': False,
     'depends_on_past': False,  # Prevent failed runs from blocking next runs
@@ -47,6 +46,7 @@ default_args = {
     catchup=False,
     tags=['scraping', 'jobs'],
     max_active_tasks=3,  # Limit concurrent tasks
+    max_active_runs=1,   # Control concurrent DAG runs
     dagrun_timeout=timedelta(hours=1),  # Entire DAG must complete within 1 hour
 )
 def job_scraper_dag():
