@@ -165,14 +165,27 @@ class GreenhouseSource(BaseSource):
             }
         })
         
-        # Return dictionary matching Job model schema
+        # Get current timestamp for temporal fields
+        now = datetime.utcnow()
+        
+        # Return dictionary matching Job model schema exactly
         return {
+            # Required fields
             'source_job_id': source_job_id,
             'title': title,
             'location': location,
             'department': department,
-            'description': '\n'.join(description_text),  # Store as top-level field
-            'raw_data': raw_data  # JSON-serializable dict without HTML
+            'description': '\n'.join(description_text),
+            'raw_data': raw_data,
+            
+            # Default fields
+            'active': True,
+            'first_seen': now,
+            'last_seen': now,
+            'created_at': now,
+            'updated_at': now
+            
+            # Note: company_id and company_source_id will be added by the DAG
         }
     
     def prepare_scraping_config(self, url: str) -> dict:

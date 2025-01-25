@@ -260,7 +260,7 @@ def job_scraper_dag():
         Args:
             source: Company source record.
             job_changes: Dictionary with new, removed, and existing job IDs.
-            listings: Original listings data for new jobs.
+            listings: Job listings with full details as dictionaries.
         """
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
@@ -295,28 +295,43 @@ def job_scraper_dag():
         
         # Insert new jobs
         if job_changes['new_jobs']:
-            new_jobs = [
-                (
-                    source['company_id'],
-                    source['id'],
-                    listing['id'],
-                    listing['title'],
-                    listing.get('location'),
-                    listing.get('department'),
-                    listing,
-                    True,
-                    now,
-                    now
-                )
-                for listing in listings
-                if listing['id'] in job_changes['new_jobs']
-            ]
+            # Convert job dictionaries to tuples matching the database schema
+            new_jobs = []
+            for listing in listings:
+                if listing['source_job_id'] in job_changes['new_jobs']:
+                    # Create tuple with fields in the same order as the INSERT statement
+                    job_tuple = (
+                        source['company_id'],        # company_id
+                        source['id'],                # company_source_id
+                        listing['source_job_id'],    # source_job_id
+                        listing['title'],            # title
+                        listing['location'],         # location
+                        listing['department'],       # department
+                        listing['description'],      # description
+                        listing['raw_data'],         # raw_data (JSON)
+                        listing['active'],           # active
+                        listing['first_seen'],       # first_seen
+                        listing['last_seen'],        # last_seen
+                        listing['created_at'],       # created_at
+                        listing['updated_at']        # updated_at
+                    )
+                    new_jobs.append(job_tuple)
             
             sql = """
                 INSERT INTO jobs (
-                    company_id, company_source_id, source_job_id,
-                    title, location, department, raw_data,
-                    active, first_seen, last_seen
+                    company_id,
+                    company_source_id,
+                    source_job_id,
+                    title,
+                    location,
+                    department,
+                    description,
+                    raw_data,
+                    active,
+                    first_seen,
+                    last_seen,
+                    created_at,
+                    updated_at
                 )
                 VALUES %s
             """
