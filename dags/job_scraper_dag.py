@@ -4,6 +4,13 @@ Job scraper DAG that orchestrates the scraping of job listings from various sour
 This DAG follows a master DAG pattern with dynamic task mapping for scalability.
 It handles the selection of company sources to scrape, fetches job listings,
 processes them, and updates the database accordingly.
+
+Scheduling Information:
+- Runs hourly
+- Does not perform catchup for missed intervals
+- Only allows one active run at a time
+- Has a 30-minute timeout per task
+- Retries failed tasks up to 3 times with 5-minute delays
 """
 from datetime import datetime, timedelta
 from typing import List, Dict
@@ -26,6 +33,9 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
     'execution_timeout': timedelta(minutes=30),
     'max_active_runs': 1,
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'depends_on_past': False,  # Prevent failed runs from blocking next runs
 }
 
 @dag(
@@ -36,6 +46,8 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs'],
+    max_active_tasks=3,  # Limit concurrent tasks
+    dagrun_timeout=timedelta(hours=1),  # Entire DAG must complete within 1 hour
 )
 def job_scraper_dag():
     """Creates a DAG for scraping job listings."""
