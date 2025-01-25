@@ -22,6 +22,7 @@ from airflow.models.baseoperator import chain
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from config.settings import SCRAPING_BEE_API_KEY
 from infrastructure.models import SourceType
+from sources.greenhouse import GreenhouseSource
 
 print("Basic imports successful")
 print("Custom module imports successful")
