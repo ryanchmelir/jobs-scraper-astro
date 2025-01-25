@@ -1,7 +1,6 @@
 """
 Environment settings and configuration for the job scraper.
 Uses Airflow connections and variables for deployment-specific settings.
-Uses environment variables for application-specific settings.
 """
 from typing import Optional
 from pydantic import BaseSettings, PostgresDsn
@@ -13,14 +12,14 @@ logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     """
-    Settings loaded from Airflow connections/variables and environment variables.
+    Settings loaded from Airflow connections/variables.
     Uses Pydantic for validation and typing.
     """
     # Environment (from Airflow variables)
     ENVIRONMENT: str = Variable.get("environment", default_var="development")
     
-    # Scraping (from environment)
-    SCRAPING_BEE_API_KEY: str
+    # Scraping (from Airflow variables)
+    SCRAPING_BEE_API_KEY: str = Variable.get("scraping_bee_api_key")
     
     # Database (from Airflow connection)
     POSTGRES_DSN: Optional[PostgresDsn] = None
@@ -48,11 +47,10 @@ class Settings(BaseSettings):
     
     class Config:
         case_sensitive = True
-        env_file = ".env"
 
 def get_settings() -> Settings:
     """
-    Get validated settings from Airflow and environment.
+    Get validated settings from Airflow.
     Raises helpful errors if required variables are missing.
     """
     try:
