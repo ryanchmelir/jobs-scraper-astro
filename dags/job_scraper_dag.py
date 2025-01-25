@@ -379,20 +379,22 @@ def job_scraper_dag():
     listings = scrape_listings.expand(source=sources)
     
     # Process listings for each source-listings pair
-    job_changes = process_listings.expand(source=sources, listings=listings)
+    job_changes = process_listings.expand(source=sources, listings=listings, zip=True)
     
     # Handle new jobs for each source-changes-listings combination
     detailed_jobs = handle_new_jobs.expand(
         source=sources,
         job_changes=job_changes,
-        listings=listings
+        listings=listings,
+        zip=True
     )
     
     # Update database for each source-changes-jobs combination
     database_updates = update_database.expand(
         source=sources,
         job_changes=job_changes,
-        listings=detailed_jobs
+        listings=detailed_jobs,
+        zip=True
     )
     
     # Update scrape times for each source
