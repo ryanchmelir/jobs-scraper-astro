@@ -17,9 +17,9 @@ from airflow.utils.helpers import chain
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from config.settings import get_db_engine, SCRAPING_BEE_API_KEY
-from infrastructure.models import CompanySource, SourceType, Job
-from sources.greenhouse import GreenhouseSource
+from dags.config.settings import get_db_engine, SCRAPING_BEE_API_KEY
+from dags.infrastructure.models import CompanySource, SourceType, Job
+from dags.sources.greenhouse import GreenhouseSource
 
 # Default arguments for all tasks
 default_args = {
