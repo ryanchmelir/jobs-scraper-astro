@@ -357,5 +357,5 @@ def job_scraper_dag():
         scrape_time_updates
     )
 
-# Create the DAG
-dag = job_scraper_dag()
+# Instantiate the DAG
+job_scraper_dag()
