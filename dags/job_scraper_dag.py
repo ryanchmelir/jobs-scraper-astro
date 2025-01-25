@@ -102,7 +102,7 @@ def job_scraper_dag():
             source: Company source record.
             
         Returns:
-            List of job listings.
+            List of job listings as dictionaries.
         """
         # Initialize the appropriate source handler
         if source['source_type'] == SourceType.GREENHOUSE.value:
@@ -121,10 +121,21 @@ def job_scraper_dag():
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 response.raise_for_status()
                 
-                # Parse the listings page
+                # Parse the listings page and convert to dictionaries
                 listings = source_handler.parse_listings_page(response.text)
-                logging.info(f"Found {len(listings)} listings")
-                return listings
+                listings_dict = [
+                    {
+                        'id': listing.source_job_id,
+                        'title': listing.title,
+                        'location': listing.location,
+                        'department': listing.department,
+                        'url': listing.url,
+                        'raw_data': listing.raw_data
+                    }
+                    for listing in listings
+                ]
+                logging.info(f"Found {len(listings_dict)} listings")
+                return listings_dict
                 
         except httpx.HTTPError as e:
             logging.error(f"HTTP error while scraping {listings_url}: {str(e)}")
