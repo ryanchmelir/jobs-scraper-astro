@@ -5,34 +5,19 @@ This DAG follows a master DAG pattern with dynamic task mapping for scalability.
 It handles the selection of company sources to scrape, fetches job listings,
 processes them, and updates the database accordingly.
 """
-import sys
-print("Python path:", sys.path)
-print("Starting to load job_scraper_dag.py")
+from datetime import datetime, timedelta
+from typing import List, Dict
+import httpx
+import logging
 
-try:
-    from datetime import datetime, timedelta
-    from typing import List, Dict, Set
-    import httpx
-    import logging
+from airflow.decorators import dag, task
+from airflow.models.baseoperator import chain
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from config.settings import SCRAPING_BEE_API_KEY
+from infrastructure.models import SourceType
 
-    from airflow.decorators import dag, task
-    from airflow.models.baseoperator import chain
-    from airflow.utils.helpers import chain
-    from sqlalchemy import select, update
-    from sqlalchemy.orm import Session
-    from airflow.providers.postgres.hooks.postgres import PostgresHook
-
-    print("Basic imports successful")
-
-    from config.settings import get_db_engine, SCRAPING_BEE_API_KEY
-    from infrastructure.models import CompanySource, SourceType, Job
-    from sources.greenhouse import GreenhouseSource
-
-    print("Custom module imports successful")
-
-except Exception as e:
-    print(f"Error importing modules: {str(e)}")
-    raise
+print("Basic imports successful")
+print("Custom module imports successful")
 
 # Default arguments for all tasks
 default_args = {
