@@ -20,6 +20,7 @@ try:
     from airflow.utils.helpers import chain
     from sqlalchemy import select, update
     from sqlalchemy.orm import Session
+    from airflow.providers.postgres.hooks.postgres import PostgresHook
 
     print("Basic imports successful")
 
@@ -60,34 +61,39 @@ def job_scraper_dag():
         Selects company sources that are due for scraping.
         
         Args:
-            batch_size: Maximum number of sources to process in one run.
+            batch_size: Maximum number of sources to scrape in one run.
             
         Returns:
-            List of company source records as dictionaries.
+            List of company source records.
         """
-        engine = get_db_engine()
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
-        with Session(engine) as session:
-            # Query for active sources that are due for scraping
-            stmt = select(CompanySource).where(
-                CompanySource.active == True,
-                (CompanySource.next_scrape_time <= datetime.utcnow()) | 
-                (CompanySource.next_scrape_time.is_(None))
-            ).limit(batch_size)
-            
-            sources = session.execute(stmt).scalars().all()
-            
-            # Convert to dictionaries for XCom serialization
-            return [
-                {
-                    'id': source.id,
-                    'company_id': source.company_id,
-                    'source_type': source.source_type.value,
-                    'source_id': source.source_id,
-                    'config': source.config
-                }
-                for source in sources
-            ]
+        # Query for active sources that are due for scraping
+        sql = """
+            SELECT 
+                id,
+                company_id,
+                source_type,
+                source_id,
+                config
+            FROM company_sources 
+            WHERE active = true 
+            AND (next_scrape_time <= NOW() OR next_scrape_time IS NULL)
+            LIMIT %(batch_size)s
+        """
+        sources = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
+        
+        # Convert to dictionaries
+        return [
+            {
+                'id': source[0],
+                'company_id': source[1],
+                'source_type': source[2],
+                'source_id': source[3],
+                'config': source[4]
+            }
+            for source in sources
+        ]
 
     @task
     def scrape_listings(source: Dict) -> List[Dict]:
@@ -95,10 +101,10 @@ def job_scraper_dag():
         Scrapes job listings for a single company source.
         
         Args:
-            source: Company source record as a dictionary.
+            source: Company source record.
             
         Returns:
-            List of job listings as dictionaries.
+            List of job listings.
         """
         # Initialize the appropriate source handler
         if source['source_type'] == SourceType.GREENHOUSE.value:
@@ -114,9 +120,9 @@ def job_scraper_dag():
         params = {
             'api_key': SCRAPING_BEE_API_KEY,
             'url': listings_url,
-            'wait': 'domcontentloaded',  # Wait for DOM to be ready
-            'premium_proxy': 'true',  # Use premium proxies for better success rate
-            **scraping_config  # Add any source-specific config
+            'wait': 'domcontentloaded',
+            'premium_proxy': 'true',
+            **scraping_config
         }
         
         try:
@@ -144,40 +150,41 @@ def job_scraper_dag():
         Processes scraped listings to identify new, existing, and removed jobs.
         
         Args:
-            source: Company source record as a dictionary.
+            source: Company source record.
             listings: List of job listings from the scrape.
             
         Returns:
             Dictionary with lists of job IDs for new, existing, and removed jobs.
         """
-        engine = get_db_engine()
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
-        with Session(engine) as session:
-            # Get existing active jobs for this source
-            stmt = select(Job).where(
-                Job.company_source_id == source['id'],
-                Job.active == True
-            )
-            existing_jobs = session.execute(stmt).scalars().all()
-            
-            # Create sets for comparison
-            existing_job_ids = {job.source_job_id for job in existing_jobs}
-            scraped_job_ids = {listing['id'] for listing in listings}
-            
-            # Identify changes
-            new_jobs = scraped_job_ids - existing_job_ids
-            removed_jobs = existing_job_ids - scraped_job_ids
-            existing_jobs = scraped_job_ids & existing_job_ids
-            
-            # Log the changes
-            logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
-                        f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
-            
-            return {
-                'new_jobs': list(new_jobs),
-                'removed_jobs': list(removed_jobs),
-                'existing_jobs': list(existing_jobs)
-            }
+        # Get existing active jobs for this source
+        sql = """
+            SELECT source_job_id 
+            FROM jobs 
+            WHERE company_source_id = %(source_id)s 
+            AND active = true
+        """
+        existing_jobs = pg_hook.get_records(sql, parameters={'source_id': source['id']})
+        
+        # Create sets for comparison
+        existing_job_ids = {job[0] for job in existing_jobs}
+        scraped_job_ids = {listing['id'] for listing in listings}
+        
+        # Identify changes
+        new_jobs = scraped_job_ids - existing_job_ids
+        removed_jobs = existing_job_ids - scraped_job_ids
+        existing_jobs = scraped_job_ids & existing_job_ids
+        
+        # Log the changes
+        logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
+                    f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
+        
+        return {
+            'new_jobs': list(new_jobs),
+            'removed_jobs': list(removed_jobs),
+            'existing_jobs': list(existing_jobs)
+        }
 
     @task
     def handle_new_jobs(source: Dict, job_changes: Dict[str, List[str]], listings: List[Dict]) -> List[Dict]:
@@ -185,7 +192,7 @@ def job_scraper_dag():
         Scrapes details for new jobs and prepares them for database insertion.
         
         Args:
-            source: Company source record as a dictionary.
+            source: Company source record.
             job_changes: Dictionary with new, removed, and existing job IDs.
             listings: Original listings data.
             
@@ -250,56 +257,69 @@ def job_scraper_dag():
         Updates the database with job changes.
         
         Args:
-            source: Company source record as a dictionary.
+            source: Company source record.
             job_changes: Dictionary with new, removed, and existing job IDs.
             listings: Original listings data for new jobs.
         """
-        engine = get_db_engine()
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
-        with Session(engine) as session:
-            # Mark removed jobs as inactive
-            if job_changes['removed_jobs']:
-                stmt = update(Job).where(
-                    Job.company_source_id == source['id'],
-                    Job.source_job_id.in_(job_changes['removed_jobs'])
-                ).values(
-                    active=False,
-                    last_seen=now
-                )
-                session.execute(stmt)
-            
-            # Update last_seen for existing jobs
-            if job_changes['existing_jobs']:
-                stmt = update(Job).where(
-                    Job.company_source_id == source['id'],
-                    Job.source_job_id.in_(job_changes['existing_jobs'])
-                ).values(
-                    last_seen=now
-                )
-                session.execute(stmt)
-            
-            # Insert new jobs
+        # Mark removed jobs as inactive
+        if job_changes['removed_jobs']:
+            sql = """
+                UPDATE jobs 
+                SET active = false, last_seen = %(now)s
+                WHERE company_source_id = %(source_id)s
+                AND source_job_id = ANY(%(job_ids)s)
+            """
+            pg_hook.run(sql, parameters={
+                'source_id': source['id'],
+                'job_ids': job_changes['removed_jobs'],
+                'now': now
+            })
+        
+        # Update last_seen for existing jobs
+        if job_changes['existing_jobs']:
+            sql = """
+                UPDATE jobs 
+                SET last_seen = %(now)s
+                WHERE company_source_id = %(source_id)s
+                AND source_job_id = ANY(%(job_ids)s)
+            """
+            pg_hook.run(sql, parameters={
+                'source_id': source['id'],
+                'job_ids': job_changes['existing_jobs'],
+                'now': now
+            })
+        
+        # Insert new jobs
+        if job_changes['new_jobs']:
             new_jobs = [
-                Job(
-                    company_id=source['company_id'],
-                    company_source_id=source['id'],
-                    source_job_id=listing['id'],
-                    title=listing['title'],
-                    location=listing.get('location'),
-                    department=listing.get('department'),
-                    raw_data=listing,
-                    active=True,
-                    first_seen=now,
-                    last_seen=now
+                (
+                    source['company_id'],
+                    source['id'],
+                    listing['id'],
+                    listing['title'],
+                    listing.get('location'),
+                    listing.get('department'),
+                    listing,
+                    True,
+                    now,
+                    now
                 )
                 for listing in listings
                 if listing['id'] in job_changes['new_jobs']
             ]
-            if new_jobs:
-                session.add_all(new_jobs)
             
-            session.commit()
+            sql = """
+                INSERT INTO jobs (
+                    company_id, company_source_id, source_job_id,
+                    title, location, department, raw_data,
+                    active, first_seen, last_seen
+                )
+                VALUES %s
+            """
+            pg_hook.insert_rows('jobs', new_jobs)
 
     @task
     def update_scrape_time(source: Dict) -> None:
@@ -307,26 +327,35 @@ def job_scraper_dag():
         Updates the next_scrape_time for a company source.
         
         Args:
-            source: Company source record as a dictionary.
+            source: Company source record.
         """
-        engine = get_db_engine()
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
-        with Session(engine) as session:
-            # Get the source to check its scrape interval
-            stmt = select(CompanySource).where(
-                CompanySource.id == source['id']
-            )
-            company_source = session.execute(stmt).scalar_one()
-            
-            # Calculate next scrape time
-            interval = timedelta(hours=company_source.scrape_interval or 24)
-            next_scrape = now + interval
-            
-            # Update the source
-            company_source.last_scraped = now
-            company_source.next_scrape_time = next_scrape
-            session.commit()
+        # Get the source to check its scrape interval
+        sql = """
+            SELECT scrape_interval 
+            FROM company_sources 
+            WHERE id = %(source_id)s
+        """
+        result = pg_hook.get_first(sql, parameters={'source_id': source['id']})
+        interval_hours = result[0] if result else 24
+        
+        # Calculate next scrape time
+        next_scrape = now + timedelta(hours=interval_hours)
+        
+        # Update the source
+        sql = """
+            UPDATE company_sources 
+            SET last_scraped = %(now)s,
+                next_scrape_time = %(next_scrape)s
+            WHERE id = %(source_id)s
+        """
+        pg_hook.run(sql, parameters={
+            'source_id': source['id'],
+            'now': now,
+            'next_scrape': next_scrape
+        })
 
     # Get sources to scrape
     sources = get_company_sources_to_scrape()
@@ -351,7 +380,7 @@ def job_scraper_dag():
     database_updates = update_database.expand(
         source=sources,
         job_changes=job_changes,
-        listings=detailed_jobs  # Use detailed jobs instead of listings
+        listings=detailed_jobs
     )
     
     # Update scrape times
