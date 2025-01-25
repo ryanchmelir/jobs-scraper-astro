@@ -66,8 +66,7 @@ class GreenhouseSource(BaseSource):
                     url=f"https://boards.greenhouse.io{job_url}",
                     raw_data={
                         'departments': departments,
-                        'office_ids': opening.get('office_id', '').split(','),
-                        'html': html.tostring(opening).decode('utf-8')
+                        'office_ids': opening.get('office_id', '').split(',')
                     }
                 )
                 listings.append(listing)
@@ -135,11 +134,24 @@ class GreenhouseSource(BaseSource):
         if department_elements:
             department = department_elements[0].getnext().text.strip()
         
-        # Get full description
-        description = html.tostring(content_div, encoding='unicode')
+        # Extract clean text content from sections
+        description_text = []
+        
+        # Get all text nodes while preserving structure
+        for element in content_div.xpath('.//text()'):
+            text = element.strip()
+            if text and not text.startswith('Apply'):  # Skip application buttons
+                description_text.append(text)
         
         # Get source_job_id from input
         source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
+        
+        # Get existing raw data while preserving non-HTML fields
+        existing_raw_data = job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {})
+        raw_data = {
+            k: v for k, v in existing_raw_data.items() 
+            if k not in ('html', 'detail_html')  # Exclude HTML fields
+        }
         
         # Return dictionary with all fields
         return {
@@ -148,10 +160,8 @@ class GreenhouseSource(BaseSource):
             'location': location,
             'department': department,
             'raw_data': {
-                'description': description,
-                'detail_html': html_content,
-                # Preserve any existing raw data
-                **(job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {}))
+                'description': '\n'.join(description_text),  # Clean text content
+                **raw_data  # Include only non-HTML raw data
             }
         }
     
