@@ -9,7 +9,7 @@ Scheduling Information:
 - Runs every 10 minutes
 - Does not perform catchup for missed intervals
 - High SQL concurrency for fast discovery
-- Respects ScrapingBee's 5 concurrent request limit
+- Uses 'scraping_bee' pool to limit to 5 concurrent requests across all DAGs
 - Short timeout per task
 """
 from datetime import datetime, timedelta
@@ -97,24 +97,49 @@ def job_discovery_dag():
         
         return chunked_sources
 
-    @task
+    @task(pool='scraping_bee', pool_slots=1)
     def scrape_listings(source: Dict) -> List[Dict]:
         """
         Quickly scrapes basic job listing information.
-        Rate limited by chunk_id to respect ScrapingBee's concurrent request limit.
+        Uses Airflow pool to ensure max 5 concurrent requests to ScrapingBee across all DAGs.
+        Properly handles rate limiting and updates company_source_issues on failures.
         """
         if source['source_type'] == SourceType.GREENHOUSE.value:
             source_handler = GreenhouseSource()
         else:
             raise ValueError(f"Unsupported source type: {source['source_type']}")
         
-        listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
-        scraping_config = source_handler.prepare_scraping_config(listings_url)
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         try:
+            listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
+            scraping_config = source_handler.prepare_scraping_config(listings_url)
+            
             logging.info(f"Scraping listings from {listings_url} (chunk {source['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
+                
+                # Handle rate limiting explicitly
+                if response.status_code == 429:
+                    error_msg = "Rate limited by ScrapingBee (429)"
+                    logging.warning(f"{error_msg} for source {source['id']}")
+                    
+                    # Update company_source_issues
+                    pg_hook.run("""
+                        INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
+                        VALUES (%(source_id)s, 1, NOW(), %(error)s)
+                        ON CONFLICT (company_source_id) DO UPDATE SET
+                            failure_count = company_source_issues.failure_count + 1,
+                            last_failure = NOW(),
+                            last_error = %(error)s
+                    """, parameters={
+                        'source_id': source['id'],
+                        'error': error_msg
+                    })
+                    
+                    from airflow.exceptions import AirflowException
+                    raise AirflowException(error_msg)
+                
                 response.raise_for_status()
                 
                 listings = source_handler.parse_listings_page(response.text, source['source_id'])
@@ -135,10 +160,17 @@ def job_discovery_dag():
                     source['config'] = {}
                 source['config']['working_url_pattern'] = scraping_config['url']
                 
-                pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+                # Clear any previous issues on success
+                pg_hook.run("""
+                    DELETE FROM company_source_issues
+                    WHERE company_source_id = %(source_id)s
+                """, parameters={'source_id': source['id']})
+                
+                # Update source success timestamp
                 pg_hook.run("""
                     UPDATE company_sources 
-                    SET config = %(config)s
+                    SET config = %(config)s,
+                        next_scrape_time = NOW() + INTERVAL '10 minutes'
                     WHERE id = %(source_id)s
                 """, parameters={
                     'source_id': source['id'],
@@ -149,8 +181,24 @@ def job_discovery_dag():
                 return listings_dict
                 
         except Exception as e:
-            logging.error(f"Error scraping {listings_url}: {str(e)}")
-            raise
+            error_msg = str(e)
+            logging.error(f"Error scraping {listings_url}: {error_msg}")
+            
+            # Don't update issues table for rate limiting as it's handled above
+            if not isinstance(e, AirflowException):
+                pg_hook.run("""
+                    INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
+                    VALUES (%(source_id)s, 1, NOW(), %(error)s)
+                    ON CONFLICT (company_source_id) DO UPDATE SET
+                        failure_count = company_source_issues.failure_count + 1,
+                        last_failure = NOW(),
+                        last_error = %(error)s
+                """, parameters={
+                    'source_id': source['id'],
+                    'error': error_msg
+                })
+            
+            raise  # Re-raise to trigger task failure
 
     @task
     def process_listings(source_and_listings) -> Dict[str, List[str]]:
