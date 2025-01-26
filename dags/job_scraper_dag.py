@@ -317,12 +317,13 @@ def job_scraper_dag():
         
         detailed_jobs = []
         config_updated = False
+        failed_jobs = []
         
         # Scrape details for each new job
         for listing in new_job_listings:
             try:
-                # Get job detail URL
-                detail_url = source_handler.get_job_detail_url(listing)
+                # Get job detail URL - this will now fail fast if no pattern works
+                detail_url = source_handler.get_job_detail_url(listing, source.get('config', {}))
                 
                 # Make the request
                 logging.info(f"Scraping job details from {detail_url}")
@@ -371,6 +372,7 @@ def job_scraper_dag():
                     
             except Exception as e:
                 logging.error(f"Error scraping job details for {listing['id']}: {str(e)}", exc_info=True)
+                failed_jobs.append(listing['id'])
                 continue
         
         # If we found a working pattern, update the source config in the database
@@ -384,7 +386,10 @@ def job_scraper_dag():
                 'source_id': source['id'],
                 'config': json.dumps(source['config'])
             })
-                
+        
+        if failed_jobs:
+            logging.warning(f"Failed to scrape details for jobs: {failed_jobs}")
+            
         logging.info(f"Scraped details for {len(detailed_jobs)} new jobs")
         return detailed_jobs
 

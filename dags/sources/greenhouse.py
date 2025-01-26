@@ -305,9 +305,8 @@ class GreenhouseSource(BaseSource):
                 logging.debug(f"Pattern {pattern} failed: {str(e)}")
                 continue
         
-        # If all patterns fail, use first pattern as fallback
-        logging.warning(f"No working job detail pattern found for {job_id}, using default")
-        return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id)
+        # If no patterns work, raise an exception instead of falling back
+        raise ValueError(f"No working job detail pattern found for job {job_id}")
 
     def get_listing_url(self, listing: Dict | JobListing) -> str:
         """Get the URL for a job listing."""
