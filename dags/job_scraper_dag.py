@@ -318,11 +318,18 @@ def job_scraper_dag():
         detailed_jobs = []
         config_updated = False
         failed_jobs = []
+        MAX_CONSECUTIVE_FAILURES = 3  # Stop after this many consecutive failures
+        consecutive_failures = 0
         
         # Scrape details for each new job
         for listing in new_job_listings:
             try:
-                # Get job detail URL - this will now fail fast if no pattern works
+                # Check if we've hit too many consecutive failures
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logging.error(f"Stopping after {MAX_CONSECUTIVE_FAILURES} consecutive failures")
+                    break
+                    
+                # Get job detail URL
                 detail_url = source_handler.get_job_detail_url(listing, source.get('config', {}))
                 
                 # Make the request
@@ -332,31 +339,37 @@ def job_scraper_dag():
                                        params=source_handler.prepare_scraping_config(detail_url))
                     response.raise_for_status()
                     
-                    # Parse job details with better error handling
+                    # Parse job details
                     job_details = source_handler.parse_job_details(response.text, listing)
                     if not isinstance(job_details, dict):
                         raise ValueError(f"Expected dictionary from parse_job_details, got {type(job_details)}")
                     
-                    # Extract raw_data with validation
+                    # Reset consecutive failures on success
+                    consecutive_failures = 0
+                    
+                    # Process the successful response
                     raw_data = job_details.get('raw_data', {})
                     if not isinstance(raw_data, dict):
                         raw_data = {}
                     
-                    # Check if we found a working job detail pattern
+                    # Update config if we found a working pattern
                     if raw_data.get('config', {}).get('working_job_detail_pattern'):
                         config_updated = True
                         if source.get('config') is None:
                             source['config'] = {}
                         source['config']['working_job_detail_pattern'] = raw_data['config']['working_job_detail_pattern']
                     
-                    # Parse salary string into structured data
-                    salary_min, salary_max, salary_currency = parse_salary_string(raw_data.get('salary'))
+                    # Update failed patterns if any
+                    if raw_data.get('config', {}).get('failed_job_detail_patterns'):
+                        if source.get('config') is None:
+                            source['config'] = {}
+                        source['config']['failed_job_detail_patterns'] = raw_data['config']['failed_job_detail_patterns']
                     
-                    # Normalize employment type and remote status
+                    # Process the job details
+                    salary_min, salary_max, salary_currency = parse_salary_string(raw_data.get('salary'))
                     employment_type = normalize_employment_type(raw_data.get('employment_type'))
                     remote_status = normalize_remote_status(raw_data.get('remote_status'))
                     
-                    # Prepare job record with safe gets
                     detailed_job = {
                         **listing,
                         'description': job_details.get('description', ''),
@@ -373,10 +386,11 @@ def job_scraper_dag():
             except Exception as e:
                 logging.error(f"Error scraping job details for {listing['id']}: {str(e)}", exc_info=True)
                 failed_jobs.append(listing['id'])
+                consecutive_failures += 1
                 continue
         
-        # If we found a working pattern, update the source config in the database
-        if config_updated:
+        # If we found a working pattern or failed patterns, update the source config
+        if config_updated or source.get('config', {}).get('failed_job_detail_patterns'):
             pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
             pg_hook.run("""
                 UPDATE company_sources 
@@ -389,7 +403,7 @@ def job_scraper_dag():
         
         if failed_jobs:
             logging.warning(f"Failed to scrape details for jobs: {failed_jobs}")
-            
+        
         logging.info(f"Scraped details for {len(detailed_jobs)} new jobs")
         return detailed_jobs
 

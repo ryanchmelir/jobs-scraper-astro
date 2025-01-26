@@ -235,12 +235,13 @@ class GreenhouseSource(BaseSource):
                     title=title,
                     location=location,
                     department=department,
-                    url=job_url,  # Store the original URL
+                    url=job_url,
                     raw_data={
                         'departments': departments,
                         'office_ids': opening.get('office_id', '').split(','),
                         'source': 'greenhouse',
-                        'original_url': job_url,  # Store original URL for reference
+                        'source_id': source_id,
+                        'original_url': job_url,
                         'scraped_at': datetime.utcnow().isoformat()
                     }
                 )
@@ -263,29 +264,46 @@ class GreenhouseSource(BaseSource):
         if not job_id:
             raise ValueError(f"Could not extract job_id from {url}")
         
-        # Get company_id from the URL - it should be the source_id that was used to create it
-        company_id = self._extract_company_id(url)
+        # Get company_id from raw_data or config
+        company_id = None
+        if isinstance(listing, dict):
+            company_id = listing.get('raw_data', {}).get('source_id')
+        else:
+            company_id = getattr(listing, 'raw_data', {}).get('source_id')
+        
+        # If not in raw_data, try to extract from URL (as fallback)
         if not company_id:
-            raise ValueError(f"Could not extract company_id from {url}")
+            company_id = self._extract_company_id(url)
+        
+        if not company_id:
+            raise ValueError(f"No company_id available for job {job_id}")
         
         # Check for cached pattern first
         if cached_pattern := config.get('working_job_detail_pattern'):
             try:
                 url = cached_pattern.format(company=company_id, job_id=job_id)
-                success, _ = self._check_url_head(url)
-                if success:
+                # Use the client that follows redirects for job details
+                response = self.client.head(url)
+                if response.status_code == 200:
                     logging.info(f"Using cached job detail pattern for {job_id}")
                     return url
                 logging.warning(f"Cached job detail pattern failed for {job_id}, trying alternatives")
             except Exception as e:
                 logging.warning(f"Error with cached job detail pattern: {str(e)}")
         
+        # Check for known failed patterns
+        failed_patterns = config.get('failed_job_detail_patterns', [])
+        
         # Try each pattern in order
         for pattern in self.JOB_DETAIL_URLS:
+            if pattern in failed_patterns:
+                continue
+            
             try:
                 url = pattern.format(company=company_id, job_id=job_id)
-                success, _ = self._check_url_head(url)
-                if success:
+                # Use the client that follows redirects for job details
+                response = self.client.head(url)
+                if response.status_code == 200:
                     # Store working pattern in raw_data for later persistence
                     if isinstance(listing, dict):
                         if 'raw_data' not in listing:
@@ -305,7 +323,21 @@ class GreenhouseSource(BaseSource):
                 logging.debug(f"Pattern {pattern} failed: {str(e)}")
                 continue
         
-        # If no patterns work, raise an exception instead of falling back
+        # If we get here, add all patterns to failed_patterns in config
+        if isinstance(listing, dict):
+            if 'raw_data' not in listing:
+                listing['raw_data'] = {}
+            if 'config' not in listing['raw_data']:
+                listing['raw_data']['config'] = {}
+            listing['raw_data']['config']['failed_job_detail_patterns'] = self.JOB_DETAIL_URLS
+        else:
+            if not hasattr(listing, 'raw_data'):
+                listing.raw_data = {}
+            if 'config' not in listing.raw_data:
+                listing.raw_data['config'] = {}
+            listing.raw_data['config']['failed_job_detail_patterns'] = self.JOB_DETAIL_URLS
+        
+        # If no patterns work, raise an exception
         raise ValueError(f"No working job detail pattern found for job {job_id}")
 
     def get_listing_url(self, listing: Dict | JobListing) -> str:
