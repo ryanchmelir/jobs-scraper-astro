@@ -592,13 +592,13 @@ def job_scraper_dag():
     # Map the scraping task to each source
     listings = scrape_listings.expand(source=sources)
     
-    # Process listings for each source-listings pair
-    job_changes = process_listings.expand(
+    # Initial status updates based on listings success/failure
+    initial_status_updates = handle_source_success.expand(
         source_and_listings=sources.zip(listings)
     )
     
-    # Handle success/failure based on listings result
-    source_status_updates = handle_source_success.expand(
+    # Process listings for each source-listings pair
+    job_changes = process_listings.expand(
         source_and_listings=sources.zip(listings)
     )
     
@@ -612,16 +612,21 @@ def job_scraper_dag():
         source_changes_and_jobs=sources.zip(job_changes, detailed_jobs)
     )
     
+    # Final status updates based on overall processing
+    final_status_updates = handle_source_success.expand(
+        source_and_listings=sources.zip(detailed_jobs)
+    )
+    
     # Update scrape times for each source
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
-    # Set up dependencies between mapped tasks
+    # Set up task dependencies
     chain(
         listings,
-        [job_changes, source_status_updates],
+        [job_changes, initial_status_updates],
         detailed_jobs,
         database_updates,
-        scrape_time_updates
+        [final_status_updates, scrape_time_updates]
     )
 
 # Instantiate the DAG
