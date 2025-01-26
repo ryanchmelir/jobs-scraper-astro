@@ -383,6 +383,15 @@ def job_scraper_dag():
                     requirements_json = json.dumps(job.get('requirements', []))
                     benefits_json = json.dumps(job.get('benefits', []))
                     
+                    # Ensure enum values are properly set
+                    employment_type = job.get('employment_type')
+                    if employment_type is None or employment_type not in EmploymentType.__members__:
+                        employment_type = EmploymentType.UNKNOWN.name
+                    
+                    remote_status = job.get('remote_status')
+                    if remote_status is None or remote_status not in RemoteStatus.__members__:
+                        remote_status = RemoteStatus.UNKNOWN.name
+                    
                     job_tuple = (
                         source['company_id'],                    # company_id
                         job.get('title', ''),                    # title
@@ -400,9 +409,9 @@ def job_scraper_dag():
                         job.get('salary_min'),                  # salary_min
                         job.get('salary_max'),                  # salary_max
                         job.get('salary_currency'),             # salary_currency
-                        job.get('employment_type', 'UNKNOWN'),   # employment_type
-                        job.get('remote_status', 'UNKNOWN'),     # remote_status
-                        requirements_json,                       # requirements
+                        employment_type,                        # employment_type (enum)
+                        remote_status,                          # remote_status (enum)
+                        requirements_json,                      # requirements
                         benefits_json                           # benefits
                     )
                     job_tuples.append(job_tuple)
