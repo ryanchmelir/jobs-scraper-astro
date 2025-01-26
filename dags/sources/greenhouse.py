@@ -50,12 +50,12 @@ class GreenhouseSource(BaseSource):
     # Class-level rate limiter: 10 requests per minute
     _rate_limiter = RateLimiter(calls=10, period=60.0)
     
-    # URL patterns for Greenhouse job boards
+    # URL patterns for Greenhouse job boards, ordered by preference
     BASE_URLS = [
-        "https://boards.greenhouse.io/{company}",
-        "https://job-boards.greenhouse.io/{company}",
+        "https://job-boards.greenhouse.io/embed/job_board?for={company}",  # Most reliable
         "https://boards.greenhouse.io/embed/job_board?for={company}",
-        "https://job-boards.greenhouse.io/embed/job_board?for={company}"
+        "https://job-boards.greenhouse.io/{company}",
+        "https://boards.greenhouse.io/{company}"
     ]
     
     def __init__(self):
@@ -67,7 +67,9 @@ class GreenhouseSource(BaseSource):
         self.html_converter.protect_links = True  # Don't wrap links
         self.html_converter.unicode_snob = True  # Use Unicode
         self.html_converter.ul_item_mark = '-'  # Use - for unordered lists
+        # Create two clients - one that follows redirects and one that doesn't
         self.client = httpx.Client(timeout=10.0, follow_redirects=True)
+        self.head_client = httpx.Client(timeout=10.0, follow_redirects=False)
     
     # Employment and remote work patterns
     EMPLOYMENT_PATTERNS = [
@@ -104,14 +106,24 @@ class GreenhouseSource(BaseSource):
 
     def _check_url_head(self, url: str) -> Tuple[bool, Optional[str]]:
         """
-        Check if a URL is accessible and get its final redirect location.
+        Check if a URL is accessible and returns a Greenhouse page.
         Returns (success, final_url).
         """
         try:
-            response = self.client.head(url)
+            response = self.head_client.head(url)
+            
+            # If it's a 200, this URL works
             if response.status_code == 200:
-                return True, str(response.url)
+                return True, url
+                
+            # If it's a redirect, check if it's redirecting to a non-Greenhouse domain
+            if response.status_code == 302:
+                location = response.headers.get('location', '')
+                if not any(domain in location.lower() for domain in ['greenhouse.io', 'job-boards.greenhouse.io']):
+                    return False, None
+                    
             return False, None
+            
         except Exception as e:
             logging.debug(f"HEAD request failed for {url}: {str(e)}")
             return False, None
