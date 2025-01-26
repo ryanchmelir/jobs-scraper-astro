@@ -316,6 +316,7 @@ def job_scraper_dag():
         ]
         
         detailed_jobs = []
+        config_updated = False
         
         # Scrape details for each new job
         for listing in new_job_listings:
@@ -340,6 +341,13 @@ def job_scraper_dag():
                     if not isinstance(raw_data, dict):
                         raw_data = {}
                     
+                    # Check if we found a working job detail pattern
+                    if raw_data.get('config', {}).get('working_job_detail_pattern'):
+                        config_updated = True
+                        if source.get('config') is None:
+                            source['config'] = {}
+                        source['config']['working_job_detail_pattern'] = raw_data['config']['working_job_detail_pattern']
+                    
                     # Parse salary string into structured data
                     salary_min, salary_max, salary_currency = parse_salary_string(raw_data.get('salary'))
                     
@@ -351,24 +359,31 @@ def job_scraper_dag():
                     detailed_job = {
                         **listing,
                         'description': job_details.get('description', ''),
-                        'url': job_details.get('url', listing.get('url', '')),  # Get URL from job_details or listing
+                        'url': job_details.get('url', listing.get('url', '')),
                         'salary_min': salary_min,
                         'salary_max': salary_max,
                         'salary_currency': salary_currency,
                         'employment_type': employment_type,
                         'remote_status': remote_status,
-                        'raw_data': {
-                            'departments': raw_data.get('departments', []),
-                            'office_ids': raw_data.get('office_ids', []),
-                            'source': 'greenhouse',
-                            'scraped_at': datetime.utcnow().isoformat()
-                        }
+                        'raw_data': raw_data
                     }
                     detailed_jobs.append(detailed_job)
                     
             except Exception as e:
                 logging.error(f"Error scraping job details for {listing['id']}: {str(e)}", exc_info=True)
                 continue
+        
+        # If we found a working pattern, update the source config in the database
+        if config_updated:
+            pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+            pg_hook.run("""
+                UPDATE company_sources 
+                SET config = %(config)s
+                WHERE id = %(source_id)s
+            """, parameters={
+                'source_id': source['id'],
+                'config': json.dumps(source['config'])
+            })
                 
         logging.info(f"Scraped details for {len(detailed_jobs)} new jobs")
         return detailed_jobs
