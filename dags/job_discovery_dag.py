@@ -229,6 +229,7 @@ def job_discovery_dag():
         # For Greenhouse sources, validate URLs efficiently
         url_status = None
         working_pattern = None
+        url_issues = False  # New variable to track URL issues
         redirects_externally = False
         
         if source['source_type'] == SourceType.GREENHOUSE.value and listings:
@@ -277,8 +278,7 @@ def job_discovery_dag():
                     if not listing.get('raw_data'):
                         listing['raw_data'] = {}
                     listing['raw_data']['redirects_externally'] = True
-                    # URL will be either the original well-formed URL or a constructed Greenhouse URL
-                    listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
+                    url_issues = False  # Explicitly mark no URL issues when redirects work
                     
             else:  # status == 'invalid'
                 # No working patterns found - try to use well-formed URLs or construct standard ones
@@ -286,6 +286,7 @@ def job_discovery_dag():
                     if not listing.get('raw_data'):
                         listing['raw_data'] = {}
                     listing['raw_data']['needs_details'] = False
+                    url_issues = True  # Mark URL issues when invalid
                     # URL will be either the original well-formed URL or a constructed Greenhouse URL
                     listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
             
@@ -294,8 +295,7 @@ def job_discovery_dag():
                 source['config']['working_job_detail_pattern'] = working_pattern
             elif redirects_externally:
                 source['config']['redirects_externally'] = True
-            else:
-                # No working patterns and no redirects - mark source as having URL issues
+            if url_issues:  # Only set URL issues if explicitly true
                 source['config']['url_issues'] = True
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
@@ -307,7 +307,7 @@ def job_discovery_dag():
             'existing_jobs': list(existing_jobs),
             'url_status': url_status,
             'working_pattern': working_pattern,
-            'redirects_externally': redirects_externally
+            'updated_config': source['config']  # Return the updated config
         }
 
     @task
