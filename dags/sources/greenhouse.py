@@ -13,58 +13,27 @@ from threading import Lock
 import httpx
 
 from .base import BaseSource, JobListing
+from scraping.parsers import (
+    TECH_SKILLS,
+    SENIORITY_PATTERNS,
+    CURRENCY_MAP,
+    EMPLOYMENT_PATTERNS,
+    REMOTE_PATTERNS,
+    SALARY_PATTERNS,
+    LOCATION_PATTERNS,
+    extract_structured_salary,
+    extract_structured_location,
+    extract_skills,
+    extract_seniority,
+    normalize_employment_type,
+    normalize_remote_status,
+    extract_with_patterns
+)
 
 try:
     from config.settings import SCRAPING_BEE_API_KEY
 except ImportError:
     SCRAPING_BEE_API_KEY = None  # Will be mocked in tests
-
-# Common tech skills by category
-TECH_SKILLS = {
-    'programming': [
-        'python', 'java', 'javascript', 'typescript', 'c\+\+', 'c#', 'ruby', 'go', 'rust',
-        'php', 'scala', 'kotlin', 'swift', 'objective-c', 'perl', 'r programming'
-    ],
-    'data': [
-        'sql', 'mysql', 'postgresql', 'mongodb', 'elasticsearch', 'redis', 'cassandra',
-        'hadoop', 'spark', 'tableau', 'power bi', 'looker', 'pandas', 'numpy',
-        'scikit-learn', 'tensorflow', 'pytorch', 'machine learning', 'ai', 'nlp',
-        'data mining', 'etl', 'data warehouse', 'data lake', 'snowflake', 'redshift'
-    ],
-    'web': [
-        'html', 'css', 'react', 'angular', 'vue', 'node\.js', 'express', 'django',
-        'flask', 'spring', 'asp\.net', 'ruby on rails', 'graphql', 'rest api'
-    ],
-    'cloud': [
-        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'terraform', 'ansible',
-        'jenkins', 'circleci', 'github actions', 'devops', 'sre', 'cloud native'
-    ],
-    'tools': [
-        'git', 'jira', 'confluence', 'slack', 'agile', 'scrum', 'kanban',
-        'ci/cd', 'testing', 'debugging', 'monitoring', 'logging'
-    ]
-}
-
-# Seniority levels and their variations
-SENIORITY_PATTERNS = [
-    (r'\b(principal|staff|lead|architect)\b', 'Principal/Staff'),
-    (r'\b(senior|sr\.?|experienced)\b', 'Senior'),
-    (r'\b(mid|intermediate)\b', 'Mid-Level'),
-    (r'\b(junior|jr\.?|entry[- ]?level|associate)\b', 'Junior'),
-    (r'\b(intern|internship|co-op)\b', 'Intern')
-]
-
-# Currency codes and symbols
-CURRENCY_MAP = {
-    '$': 'USD',
-    '£': 'GBP',
-    '€': 'EUR',
-    '¥': 'JPY',
-    'USD': 'USD',
-    'GBP': 'GBP',
-    'EUR': 'EUR',
-    'JPY': 'JPY'
-}
 
 class RateLimiter:
     """Simple rate limiter for API calls."""
@@ -126,39 +95,6 @@ class GreenhouseSource(BaseSource):
         self.client = httpx.Client(timeout=10.0, follow_redirects=True)
         self.head_client = httpx.Client(timeout=10.0, follow_redirects=False)
     
-    # Employment and remote work patterns
-    EMPLOYMENT_PATTERNS = [
-        r'(full[- ]time|part[- ]time)',
-        r'(permanent|contract|temporary)',
-        r'(internship|co-op)',
-        r'(\d+|full)[- ]time equivalent'
-    ]
-
-    REMOTE_PATTERNS = [
-        r'(remote|hybrid|office[- ]first)',
-        r'(in[- ]office|on[- ]site)',
-        r'(work[- ]from[- ]home|wfh)',
-        r'(\d+\s*days?\s*(in|remote))'
-    ]
-
-    SALARY_PATTERNS = [
-        r'\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?(?:\s*[-–]\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?)?',
-        r'~\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?',
-        r'Salary:\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?',
-        r'(\d{2,3})[k+](?:\s*-\s*(\d{2,3})[k+])?',
-        r'(?:USD|EUR|GBP)?\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
-        r'compensation.*?\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',
-        r'range.*?\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
-    ]
-
-    LOCATION_PATTERNS = [
-        r'((?:remote|hybrid)\s+in\s+[^\.;]+)',
-        r'((?:based|located)\s+in\s+[^\.;]+)',
-        r'(location:\s*[^\.;]+)',
-        r'([A-Z][a-zA-Z\s]+,\s+[A-Z]{2})',  # City, State
-        r'([A-Z][a-zA-Z\s]+,\s+[A-Z][a-zA-Z\s]+)'  # City, Country
-    ]
-
     def _check_url_head(self, url: str) -> Tuple[bool, Optional[str]]:
         """
         Check if a URL is accessible and returns a Greenhouse page.
@@ -258,7 +194,10 @@ class GreenhouseSource(BaseSource):
             return None
 
     def parse_listings_page(self, html_content: str, source_id: str) -> List[JobListing]:
-        """Parse the Greenhouse job board HTML into JobListing objects."""
+        """
+        Parse the Greenhouse job board HTML into JobListing objects.
+        This is a fast parser that only extracts essential fields needed for job discovery.
+        """
         listings = []
         tree = html.fromstring(html_content)
         
@@ -293,12 +232,12 @@ class GreenhouseSource(BaseSource):
                 
                 # Extract title - handle both formats
                 title_elements = (
-                    job_link.xpath('.//p[contains(@class, "body--medium")]/text()[1]') or  # New format (first text node)
-                    job_link.xpath('.//text()[not(parent::span[@class="tag-text"])]')  # Traditional format, excluding "New" tag
+                    job_link.xpath('.//p[contains(@class, "body--medium")]/text()[1]') or  # New format
+                    job_link.xpath('.//text()[not(parent::span[@class="tag-text"])]')  # Traditional format
                 )
                 # Clean up title
                 title = ' '.join(t.strip() for t in title_elements if t.strip())
-                title = re.sub(r'\s*New\s*', '', title)  # Remove any remaining "New" text
+                title = re.sub(r'\s*New\s*', '', title)  # Remove any "New" text
                 title = title.strip()
                 
                 # Extract location - handle both formats
@@ -327,15 +266,12 @@ class GreenhouseSource(BaseSource):
                     logging.error(f"Could not extract job ID from URL: {job_url}")
                     continue
                 
-                # Create raw data with format information
+                # Create minimal raw data for discovery
                 raw_data = {
-                    'departments': [department] if department else [],
-                    'office_ids': job_element.get('office_id', '').split(','),
                     'source': 'greenhouse',
                     'source_id': source_id,
                     'original_url': job_url,
-                    'scraped_at': datetime.utcnow().isoformat(),
-                    'format': 'table' if job_element.tag == 'tr' else 'div'
+                    'scraped_at': datetime.utcnow().isoformat()
                 }
                 
                 listing = JobListing(
@@ -463,14 +399,6 @@ class GreenhouseSource(BaseSource):
         
         return None
 
-    def _extract_with_patterns(self, text: str, patterns: List[str]) -> str:
-        """Helper to extract text using a list of patterns."""
-        for pattern in patterns:
-            match = re.search(pattern, text, re.I)
-            if match:
-                return match.group(1)
-        return ""
-
     def _get_element_text(self, element) -> str:
         """Safely get text content from an element."""
         if element is None:
@@ -494,119 +422,11 @@ class GreenhouseSource(BaseSource):
         # Convert to markdown
         return self.html_converter.handle(html_str).strip()
 
-    def _extract_structured_salary(self, text: str) -> Dict:
-        """Extract structured salary information from text."""
-        result = {
-            'amount_min': None,
-            'amount_max': None,
-            'currency': None,
-            'interval': 'yearly',  # Default to yearly
-            'raw_text': text
-        }
-        
-        if not text:
-            return result
-            
-        # Try to find currency
-        for symbol, code in CURRENCY_MAP.items():
-            if symbol in text:
-                result['currency'] = code
-                break
-                
-        # Extract numbers
-        numbers = []
-        for pattern in self.SALARY_PATTERNS:
-            match = re.search(pattern, text, re.I)
-            if match:
-                # Convert k notation to full numbers
-                for group in match.groups():
-                    if group:
-                        num = group.replace(',', '')
-                        if 'k' in num.lower():
-                            num = float(num.lower().replace('k', '')) * 1000
-                        numbers.append(float(num))
-                break
-                
-        if numbers:
-            result['amount_min'] = min(numbers)
-            result['amount_max'] = max(numbers) if len(numbers) > 1 else result['amount_min']
-            
-        # Check for interval indicators
-        if any(term in text.lower() for term in ['per hour', 'hourly', '/hr', '/hour']):
-            result['interval'] = 'hourly'
-        elif any(term in text.lower() for term in ['per month', 'monthly', '/month']):
-            result['interval'] = 'monthly'
-            
-        return result
-
-    def _extract_structured_location(self, text: str) -> Dict:
-        """Extract structured location information from text."""
-        result = {
-            'is_remote': False,
-            'remote_type': None,  # fully, hybrid, optional
-            'city': None,
-            'state': None,
-            'country': None,
-            'raw_text': text
-        }
-        
-        if not text:
-            return result
-            
-        # Check for remote indicators
-        remote_match = re.search(r'(remote|hybrid|wfh|work[- ]from[- ]home)', text, re.I)
-        if remote_match:
-            result['is_remote'] = True
-            remote_type = remote_match.group(1).lower()
-            if 'hybrid' in remote_type:
-                result['remote_type'] = 'hybrid'
-            elif any(x in remote_type for x in ['remote', 'wfh', 'work from home']):
-                result['remote_type'] = 'fully'
-                
-        # Try to extract city, state (US)
-        us_match = re.search(r'([A-Z][a-zA-Z\s]+),\s*([A-Z]{2})', text)
-        if us_match:
-            result['city'] = us_match.group(1).strip()
-            result['state'] = us_match.group(2)
-            result['country'] = 'US'
-        else:
-            # Try international format
-            intl_match = re.search(r'([A-Z][a-zA-Z\s]+),\s*([A-Z][a-zA-Z\s]+)', text)
-            if intl_match:
-                result['city'] = intl_match.group(1).strip()
-                result['country'] = intl_match.group(2).strip()
-                
-        return result
-
-    def _extract_skills(self, text: str) -> Dict[str, List[str]]:
-        """Extract technical skills from text."""
-        result = {category: [] for category in TECH_SKILLS}
-        
-        if not text:
-            return result
-            
-        # Convert text to lowercase for case-insensitive matching
-        text_lower = text.lower()
-        
-        # Look for skills in each category
-        for category, skills in TECH_SKILLS.items():
-            for skill in skills:
-                # Use word boundaries for more accurate matching
-                if re.search(rf'\b{skill}\b', text_lower):
-                    result[category].append(skill)
-                    
-        return result
-
-    def _extract_seniority(self, text: str) -> Optional[str]:
-        """Extract seniority level from text."""
-        text_lower = text.lower()
-        for pattern, level in SENIORITY_PATTERNS:
-            if re.search(pattern, text_lower):
-                return level
-        return None
-
     def parse_job_details(self, html_content: str, job_listing: Dict | JobListing) -> dict:
-        """Parse job details from HTML content."""
+        """
+        Parse job details from HTML content.
+        This method focuses on extracting raw content, leaving structured data parsing to the DAG.
+        """
         tree = html.fromstring(html_content)
         
         try:
@@ -640,41 +460,10 @@ class GreenhouseSource(BaseSource):
                 tree.xpath('//div[contains(@class, "description")]')
             )
             
-            description_text = ""
-            employment_type = None
-            remote_status = None
-            salary = None
-            
+            description = ""
             if content_elems:
                 content_div = content_elems[0]
-                
-                # Convert content to markdown
-                description_text = self._clean_html_content(content_div)
-                
-                # Extract patterns from the markdown text
-                employment_type = self._extract_with_patterns(description_text, self.EMPLOYMENT_PATTERNS)
-                remote_status = self._extract_with_patterns(description_text, self.REMOTE_PATTERNS)
-                
-                # If location is empty, try to find it in the text
-                if not location:
-                    location = self._extract_with_patterns(description_text, self.LOCATION_PATTERNS)
-            
-            # Try to find salary information in multiple places
-            salary_elems = (
-                tree.xpath('//div[contains(@class, "job__pay-ranges")]') or
-                tree.xpath('//div[contains(@class, "pay-range")]') or
-                tree.xpath('//div[contains(@class, "compensation")]') or
-                tree.xpath('//p[contains(translate(text(), "SALARY", "salary"), "salary")]') or
-                tree.xpath('//li[contains(translate(text(), "SALARY", "salary"), "salary")]')
-            )
-            
-            if salary_elems:
-                salary_text = self._get_element_text(salary_elems[0])
-                for pattern in self.SALARY_PATTERNS:
-                    match = re.search(pattern, salary_text)
-                    if match:
-                        salary = match.group(0)
-                        break
+                description = self._clean_html_content(content_div)
             
             # Get source_job_id from input
             source_job_id = job_listing['source_job_id'] if isinstance(job_listing, dict) else job_listing.source_job_id
@@ -684,29 +473,6 @@ class GreenhouseSource(BaseSource):
             existing_raw_data = job_listing['raw_data'] if isinstance(job_listing, dict) else job_listing.raw_data
             raw_data = {k: v for k, v in existing_raw_data.items() if k not in ('html', 'detail_html')}
             
-            # Add structured data extraction
-            salary_data = self._extract_structured_salary(description_text)
-            location_data = self._extract_structured_location(location)
-            skills_data = self._extract_skills(description_text)
-            seniority = self._extract_seniority(title + ' ' + description_text)
-            
-            # Update raw_data with both original and structured information
-            raw_data.update({
-                'departments': raw_data.get('departments', []),
-                'office_ids': raw_data.get('office_ids', []),
-                'employment_type': employment_type,
-                'remote_status': remote_status,
-                'salary': salary,
-                'structured_salary': salary_data,
-                'structured_location': location_data,
-                'skills': skills_data,
-                'seniority': seniority,
-                'metadata': {
-                    'scraped_at': datetime.utcnow().isoformat(),
-                    'source': 'greenhouse'
-                }
-            })
-            
             # Get current timestamp for temporal fields
             now = datetime.utcnow()
             
@@ -715,7 +481,7 @@ class GreenhouseSource(BaseSource):
                 'title': title,
                 'location': location,
                 'department': None,  # Will be set by DAG
-                'description': description_text,
+                'description': description,
                 'url': self.get_listing_url(job_listing),
                 'raw_data': raw_data,
                 'active': True,
