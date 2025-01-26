@@ -455,14 +455,17 @@ def job_discovery_dag():
                     raise
 
     @task
-    def update_source_status(source_and_listings) -> None:
+    def update_source_status(source_and_changes_and_listings) -> None:
         """Updates source success/failure status and next scrape time."""
-        source, listings = source_and_listings
+        source, job_changes, listings = source_and_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
+        # Use the updated config from job_changes if available
+        updated_config = job_changes.get('updated_config') if job_changes else source.get('config')
+        
         # Add logging for incoming config
-        logging.info(f"Incoming source config in update_source_status: {json.dumps(source.get('config'))}")
+        logging.info(f"Incoming source config in update_source_status: {json.dumps(updated_config)}")
         
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
@@ -518,7 +521,7 @@ def job_discovery_dag():
                             'source_id': source['id'],
                             'now': now,
                             'next_scrape': next_scrape,
-                            'new_config': json.dumps(source.get('config', {}))
+                            'new_config': json.dumps(updated_config)
                         })
                         
                         # Add logging for final config state
@@ -564,7 +567,7 @@ def job_discovery_dag():
     )
     
     source_updates = update_source_status.expand(
-        source_and_listings=sources.zip(listings)
+        source_and_changes_and_listings=sources.zip(job_changes, listings)
     )
     
     # Set up dependencies
