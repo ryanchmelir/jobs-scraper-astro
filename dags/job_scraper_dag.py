@@ -495,6 +495,7 @@ def job_scraper_dag():
     def update_scrape_time(source: Dict) -> None:
         """
         Updates the next_scrape_time for a company source.
+        The scrape_interval in the database is stored in minutes.
         
         Args:
             source: Company source record.
@@ -502,17 +503,17 @@ def job_scraper_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
-        # Get the source to check its scrape interval
+        # Get the source to check its scrape interval (in minutes)
         sql = """
             SELECT scrape_interval 
             FROM company_sources 
             WHERE id = %(source_id)s
         """
         result = pg_hook.get_first(sql, parameters={'source_id': source['id']})
-        interval_hours = result[0] if result else 24
+        interval_minutes = result[0] if result else 1440  # Default to 24 hours (1440 minutes)
         
-        # Calculate next scrape time
-        next_scrape = now + timedelta(hours=interval_hours)
+        # Calculate next scrape time using minutes
+        next_scrape = now + timedelta(minutes=interval_minutes)
         
         # Update the source
         sql = """
