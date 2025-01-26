@@ -312,11 +312,15 @@ def job_discovery_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
+        logging.info(f"Saving jobs for source {source['id']}: {len(job_changes['new_jobs'])} new, "
+                    f"{len(job_changes['removed_jobs'])} removed, {len(job_changes['existing_jobs'])} existing")
+        
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
                 try:
                     # Mark removed jobs as inactive
                     if job_changes['removed_jobs']:
+                        logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
                         cur.execute("""
                             UPDATE jobs 
                             SET active = false,
@@ -328,9 +332,11 @@ def job_discovery_dag():
                             'job_ids': job_changes['removed_jobs'],
                             'now': now
                         })
+                        logging.info(f"Updated {cur.rowcount} removed jobs")
                     
                     # Update last_seen for existing jobs
                     if job_changes['existing_jobs']:
+                        logging.info(f"Updating {len(job_changes['existing_jobs'])} existing jobs")
                         cur.execute("""
                             UPDATE jobs 
                             SET last_seen = %(now)s,
@@ -342,6 +348,7 @@ def job_discovery_dag():
                             'job_ids': job_changes['existing_jobs'],
                             'now': now
                         })
+                        logging.info(f"Updated {cur.rowcount} existing jobs")
                     
                     # Insert new jobs with minimal data
                     if job_changes['new_jobs']:
@@ -350,6 +357,7 @@ def job_discovery_dag():
                             if listing['source_job_id'] in job_changes['new_jobs']
                         ]
                         
+                        logging.info(f"Inserting {len(new_job_listings)} new jobs")
                         for listing in new_job_listings:
                             # Only set needs_details = true if:
                             # 1. We have a working pattern (status = '200')
@@ -361,6 +369,11 @@ def job_discovery_dag():
                                 not listing.get('raw_data', {}).get('redirects_externally', False) and
                                 not listing.get('raw_data', {}).get('needs_details') is False
                             )
+                            
+                            logging.info(f"Inserting job {listing['source_job_id']} with needs_details={needs_details}")
+                            logging.debug(f"Job data: url={listing['url']}, "
+                                       f"title={listing['title']}, "
+                                       f"raw_data={json.dumps(listing.get('raw_data', {}))}")
                             
                             cur.execute("""
                                 INSERT INTO jobs (
@@ -399,24 +412,29 @@ def job_discovery_dag():
                                     last_seen = EXCLUDED.last_seen,
                                     updated_at = EXCLUDED.updated_at,
                                     needs_details = EXCLUDED.needs_details
+                                RETURNING id
                             """, {
                                 'company_id': source['company_id'],
                                 'title': listing['title'],
                                 'location': listing['location'],
                                 'department': listing['department'],
                                 'url': listing['url'],
-                                'raw_data': json.dumps(listing['raw_data']),
+                                'raw_data': json.dumps(listing.get('raw_data', {})),
                                 'now': now,
                                 'source_id': source['id'],
                                 'source_job_id': listing['source_job_id'],
                                 'needs_details': needs_details
                             })
+                            job_id = cur.fetchone()[0]
+                            logging.info(f"Inserted/updated job with id={job_id}")
                     
                     conn.commit()
+                    logging.info("Successfully committed all job changes to database")
                     
                 except Exception as e:
                     conn.rollback()
                     logging.error(f"Error saving jobs: {str(e)}")
+                    logging.error(f"Failed SQL parameters: {cur.query.decode()}")
                     raise
 
     @task
