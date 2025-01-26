@@ -567,11 +567,12 @@ def job_scraper_dag():
     )
     
     # Handle success/failure based on listings result
-    for source, listing in sources.zip(listings):
-        if listing:
-            handle_source_success.expand(source=source)
-        else:
-            handle_source_failure.expand(source=source)
+    success_handlers = handle_source_success.expand(
+        source=sources.zip(listings).filter(lambda x: x[1])
+    )
+    failure_handlers = handle_source_failure.expand(
+        source=sources.zip(listings).filter(lambda x: not x[1])
+    )
     
     # Handle new jobs for each source-changes-listings combination
     detailed_jobs = handle_new_jobs.expand(
@@ -589,7 +590,7 @@ def job_scraper_dag():
     # Set up dependencies between mapped tasks
     chain(
         listings,
-        [job_changes, handle_source_success, handle_source_failure],
+        [job_changes, success_handlers, failure_handlers],
         detailed_jobs,
         database_updates,
         scrape_time_updates
