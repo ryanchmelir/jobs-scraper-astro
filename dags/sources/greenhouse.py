@@ -19,6 +19,53 @@ try:
 except ImportError:
     SCRAPING_BEE_API_KEY = None  # Will be mocked in tests
 
+# Common tech skills by category
+TECH_SKILLS = {
+    'programming': [
+        'python', 'java', 'javascript', 'typescript', 'c\+\+', 'c#', 'ruby', 'go', 'rust',
+        'php', 'scala', 'kotlin', 'swift', 'objective-c', 'perl', 'r programming'
+    ],
+    'data': [
+        'sql', 'mysql', 'postgresql', 'mongodb', 'elasticsearch', 'redis', 'cassandra',
+        'hadoop', 'spark', 'tableau', 'power bi', 'looker', 'pandas', 'numpy',
+        'scikit-learn', 'tensorflow', 'pytorch', 'machine learning', 'ai', 'nlp',
+        'data mining', 'etl', 'data warehouse', 'data lake', 'snowflake', 'redshift'
+    ],
+    'web': [
+        'html', 'css', 'react', 'angular', 'vue', 'node\.js', 'express', 'django',
+        'flask', 'spring', 'asp\.net', 'ruby on rails', 'graphql', 'rest api'
+    ],
+    'cloud': [
+        'aws', 'azure', 'gcp', 'docker', 'kubernetes', 'terraform', 'ansible',
+        'jenkins', 'circleci', 'github actions', 'devops', 'sre', 'cloud native'
+    ],
+    'tools': [
+        'git', 'jira', 'confluence', 'slack', 'agile', 'scrum', 'kanban',
+        'ci/cd', 'testing', 'debugging', 'monitoring', 'logging'
+    ]
+}
+
+# Seniority levels and their variations
+SENIORITY_PATTERNS = [
+    (r'\b(principal|staff|lead|architect)\b', 'Principal/Staff'),
+    (r'\b(senior|sr\.?|experienced)\b', 'Senior'),
+    (r'\b(mid|intermediate)\b', 'Mid-Level'),
+    (r'\b(junior|jr\.?|entry[- ]?level|associate)\b', 'Junior'),
+    (r'\b(intern|internship|co-op)\b', 'Intern')
+]
+
+# Currency codes and symbols
+CURRENCY_MAP = {
+    '$': 'USD',
+    '£': 'GBP',
+    '€': 'EUR',
+    '¥': 'JPY',
+    'USD': 'USD',
+    'GBP': 'GBP',
+    'EUR': 'EUR',
+    'JPY': 'JPY'
+}
+
 class RateLimiter:
     """Simple rate limiter for API calls."""
     def __init__(self, calls: int, period: float):
@@ -447,6 +494,117 @@ class GreenhouseSource(BaseSource):
         # Convert to markdown
         return self.html_converter.handle(html_str).strip()
 
+    def _extract_structured_salary(self, text: str) -> Dict:
+        """Extract structured salary information from text."""
+        result = {
+            'amount_min': None,
+            'amount_max': None,
+            'currency': None,
+            'interval': 'yearly',  # Default to yearly
+            'raw_text': text
+        }
+        
+        if not text:
+            return result
+            
+        # Try to find currency
+        for symbol, code in CURRENCY_MAP.items():
+            if symbol in text:
+                result['currency'] = code
+                break
+                
+        # Extract numbers
+        numbers = []
+        for pattern in self.SALARY_PATTERNS:
+            match = re.search(pattern, text, re.I)
+            if match:
+                # Convert k notation to full numbers
+                for group in match.groups():
+                    if group:
+                        num = group.replace(',', '')
+                        if 'k' in num.lower():
+                            num = float(num.lower().replace('k', '')) * 1000
+                        numbers.append(float(num))
+                break
+                
+        if numbers:
+            result['amount_min'] = min(numbers)
+            result['amount_max'] = max(numbers) if len(numbers) > 1 else result['amount_min']
+            
+        # Check for interval indicators
+        if any(term in text.lower() for term in ['per hour', 'hourly', '/hr', '/hour']):
+            result['interval'] = 'hourly'
+        elif any(term in text.lower() for term in ['per month', 'monthly', '/month']):
+            result['interval'] = 'monthly'
+            
+        return result
+
+    def _extract_structured_location(self, text: str) -> Dict:
+        """Extract structured location information from text."""
+        result = {
+            'is_remote': False,
+            'remote_type': None,  # fully, hybrid, optional
+            'city': None,
+            'state': None,
+            'country': None,
+            'raw_text': text
+        }
+        
+        if not text:
+            return result
+            
+        # Check for remote indicators
+        remote_match = re.search(r'(remote|hybrid|wfh|work[- ]from[- ]home)', text, re.I)
+        if remote_match:
+            result['is_remote'] = True
+            remote_type = remote_match.group(1).lower()
+            if 'hybrid' in remote_type:
+                result['remote_type'] = 'hybrid'
+            elif any(x in remote_type for x in ['remote', 'wfh', 'work from home']):
+                result['remote_type'] = 'fully'
+                
+        # Try to extract city, state (US)
+        us_match = re.search(r'([A-Z][a-zA-Z\s]+),\s*([A-Z]{2})', text)
+        if us_match:
+            result['city'] = us_match.group(1).strip()
+            result['state'] = us_match.group(2)
+            result['country'] = 'US'
+        else:
+            # Try international format
+            intl_match = re.search(r'([A-Z][a-zA-Z\s]+),\s*([A-Z][a-zA-Z\s]+)', text)
+            if intl_match:
+                result['city'] = intl_match.group(1).strip()
+                result['country'] = intl_match.group(2).strip()
+                
+        return result
+
+    def _extract_skills(self, text: str) -> Dict[str, List[str]]:
+        """Extract technical skills from text."""
+        result = {category: [] for category in TECH_SKILLS}
+        
+        if not text:
+            return result
+            
+        # Convert text to lowercase for case-insensitive matching
+        text_lower = text.lower()
+        
+        # Look for skills in each category
+        for category, skills in TECH_SKILLS.items():
+            for skill in skills:
+                # Use word boundaries for more accurate matching
+                if re.search(rf'\b{skill}\b', text_lower):
+                    result[category].append(skill)
+                    
+        return result
+
+    def _extract_seniority(self, text: str) -> Optional[str]:
+        """Extract seniority level from text."""
+        text_lower = text.lower()
+        for pattern, level in SENIORITY_PATTERNS:
+            if re.search(pattern, text_lower):
+                return level
+        return None
+
     def parse_job_details(self, html_content: str, job_listing: Dict | JobListing) -> dict:
         """Parse job details from HTML content."""
         tree = html.fromstring(html_content)
@@ -526,13 +684,23 @@ class GreenhouseSource(BaseSource):
             existing_raw_data = job_listing['raw_data'] if isinstance(job_listing, dict) else job_listing.raw_data
             raw_data = {k: v for k, v in existing_raw_data.items() if k not in ('html', 'detail_html')}
             
-            # Update raw_data with structured information
+            # Add structured data extraction
+            salary_data = self._extract_structured_salary(description_text)
+            location_data = self._extract_structured_location(location)
+            skills_data = self._extract_skills(description_text)
+            seniority = self._extract_seniority(title + ' ' + description_text)
+            
+            # Update raw_data with both original and structured information
             raw_data.update({
                 'departments': raw_data.get('departments', []),
                 'office_ids': raw_data.get('office_ids', []),
                 'employment_type': employment_type,
                 'remote_status': remote_status,
                 'salary': salary,
+                'structured_salary': salary_data,
+                'structured_location': location_data,
+                'skills': skills_data,
+                'seniority': seniority,
                 'metadata': {
                     'scraped_at': datetime.utcnow().isoformat(),
                     'source': 'greenhouse'
@@ -558,10 +726,9 @@ class GreenhouseSource(BaseSource):
             }
             
         except Exception as e:
-            logging.error(f"Error parsing job details: {e}")
-            source_job_id = job_listing['source_job_id'] if isinstance(job_listing, dict) else job_listing.source_job_id
+            logging.error(f"Error parsing job details: {str(e)}")
             return {
-                'source_job_id': source_job_id,
+                'source_job_id': job_listing['source_job_id'] if isinstance(job_listing, dict) else job_listing.source_job_id,
                 'title': '',
                 'location': '',
                 'department': None,
