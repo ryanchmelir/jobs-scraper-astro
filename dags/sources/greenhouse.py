@@ -111,6 +111,14 @@ class GreenhouseSource(BaseSource):
                 return match.group(1)
         return ""
 
+    def _get_element_text(self, element) -> str:
+        """Safely get text content from an element."""
+        if element is None:
+            return ""
+        if isinstance(element, str):
+            return element.strip()
+        return element.text_content().strip()
+
     def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
         """Parse job details from HTML content."""
         tree = html.fromstring(html_content)
@@ -125,7 +133,7 @@ class GreenhouseSource(BaseSource):
                 tree.xpath('//meta[@property="og:title"]/@content') or
                 tree.xpath('//title/text()')
             )
-            title = title_elems[0].strip()[:255] if title_elems else ""
+            title = self._get_element_text(title_elems[0]) if title_elems else ""
             
             # Try different location selectors
             location_elems = (
@@ -183,7 +191,7 @@ class GreenhouseSource(BaseSource):
             )
             
             if salary_elems:
-                salary_text = salary_elems[0].text_content()
+                salary_text = self._get_element_text(salary_elems[0])
                 for pattern in self.SALARY_PATTERNS:
                     match = re.search(pattern, salary_text)
                     if match:
