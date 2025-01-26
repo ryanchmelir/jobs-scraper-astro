@@ -455,6 +455,12 @@ def job_discovery_dag():
                                                 (%(new_config)s::json->>'redirects_externally')::boolean,
                                                 (config->>'redirects_externally')::boolean,
                                                 false
+                                            ),
+                                            'url_issues',
+                                            COALESCE(
+                                                (%(new_config)s::json->>'url_issues')::boolean,
+                                                (config->>'url_issues')::boolean,
+                                                false
                                             )
                                         )
                                     ELSE config

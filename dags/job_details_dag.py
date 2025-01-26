@@ -282,7 +282,6 @@ def job_details_dag():
                                 location = COALESCE(%(location)s, location),
                                 department = COALESCE(%(department)s, department),
                                 description = %(description)s,
-                                url = COALESCE(%(url)s, url),
                                 raw_data = %(raw_data)s,
                                 salary_min = %(salary_min)s,
                                 salary_max = %(salary_max)s,
@@ -299,7 +298,6 @@ def job_details_dag():
                             'location': details.get('location'),
                             'department': details.get('department'),
                             'description': details.get('description'),
-                            'url': details.get('url'),
                             'raw_data': json.dumps(details.get('raw_data', {})),
                             'salary_min': structured_data.get('salary', {}).get('amount_min'),
                             'salary_max': structured_data.get('salary', {}).get('amount_max'),
@@ -311,23 +309,6 @@ def job_details_dag():
                         
                         # Get company_source_id from the UPDATE
                         company_source_id = cur.fetchone()[0]
-                        
-                        # Update company_sources config with working pattern if available
-                        if working_pattern := details.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
-                            cur.execute("""
-                                UPDATE company_sources
-                                SET config = jsonb_set(
-                                    CASE 
-                                        WHEN config IS NULL THEN '{}'::json
-                                        WHEN config::text = '' THEN '{}'::json
-                                        ELSE config
-                                    END,
-                                    '{working_job_detail_pattern}',
-                                    %s::json,
-                                    true
-                                )
-                                WHERE id = %s
-                            """, (json.dumps(working_pattern), company_source_id))
                         
                         # Clear any scraping issues
                         cur.execute("""
