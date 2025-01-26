@@ -226,12 +226,11 @@ def job_discovery_dag():
         url_status = None
         working_pattern = None
         
-        if source['source_type'] == SourceType.GREENHOUSE.value and new_jobs:
+        if source['source_type'] == SourceType.GREENHOUSE.value and listings:
             source_handler = GreenhouseSource()
             
-            # Test URL patterns with just one job to determine behavior
-            sample_job_id = next(iter(new_jobs))
-            sample_listing = next(l for l in listings if l['source_job_id'] == sample_job_id)
+            # Test URL patterns with first job regardless of new/existing
+            sample_listing = listings[0]  # Take first listing
             
             # Get URL status for sample job
             url, status, pattern = source_handler.get_job_detail_url(sample_listing, source.get('config', {}))
@@ -239,32 +238,26 @@ def job_discovery_dag():
             
             # Update all listings based on the result
             if status == '200':
-                # We found a working pattern - use it for all new jobs
+                # We found a working pattern - use it for all jobs
                 working_pattern = pattern
                 for listing in listings:
-                    if listing['source_job_id'] in new_jobs:
-                        try:
-                            listing['url'] = pattern.format(
-                                company=source['source_id'],
-                                job_id=listing['source_job_id']
-                            )
-                            if not listing.get('raw_data'):
-                                listing['raw_data'] = {}
-                            listing['raw_data']['config'] = {'working_job_detail_pattern': pattern}
-                        except Exception as e:
-                            logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
-                            
+                    try:
+                        listing['url'] = pattern.format(
+                            company=source['source_id'],
+                            job_id=listing['source_job_id']
+                        )
+                        if not listing.get('raw_data'):
+                            listing['raw_data'] = {}
+                        listing['raw_data']['config'] = {'working_job_detail_pattern': pattern}
+                    except Exception as e:
+                        logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
+                        
             elif status == '302':
                 # All jobs redirect externally - keep original URLs
                 for listing in listings:
-                    if listing['source_job_id'] in new_jobs:
-                        if not listing.get('raw_data'):
-                            listing['raw_data'] = {}
-                        listing['raw_data']['redirects_externally'] = True
-                        
-            else:
-                # No valid URLs - skip these jobs
-                new_jobs = set()
+                    if not listing.get('raw_data'):
+                        listing['raw_data'] = {}
+                    listing['raw_data']['redirects_externally'] = True
             
             # Update source config
             if source.get('config') is None:
@@ -425,6 +418,11 @@ def job_discovery_dag():
                                 config = CASE 
                                     WHEN %(new_config)s::json IS NOT NULL THEN
                                         json_build_object(
+                                            'working_url_pattern', 
+                                            COALESCE(
+                                                config->>'working_url_pattern',
+                                                %(new_config)s::json->>'working_url_pattern'
+                                            ),
                                             'working_job_detail_pattern',
                                             COALESCE(
                                                 (%(new_config)s::json->>'working_job_detail_pattern'),
