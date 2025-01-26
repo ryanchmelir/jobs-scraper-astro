@@ -215,14 +215,64 @@ class GreenhouseSource(BaseSource):
         listings = []
         tree = html.fromstring(html_content)
         
-        for opening in tree.xpath('//div[contains(@class, "opening")]'):
+        # Build department ID to name mapping for traditional format
+        dept_map = {}
+        for dept_header in tree.xpath('//h3[@id]|//h4[@id]'):
+            dept_id = dept_header.get('id')
+            dept_name = dept_header.text_content().strip()
+            if dept_id and dept_name:
+                dept_map[dept_id] = dept_name
+        
+        # Try both old and new formats
+        job_elements = (
+            tree.xpath('//div[contains(@class, "opening")]') +  # Traditional format
+            tree.xpath('//tr[contains(@class, "job-post")]')    # New table format
+        )
+        
+        for job_element in job_elements:
             try:
-                job_link = opening.xpath('.//a[@data-mapped]')[0]
+                # Handle both formats for job links
+                job_links = (
+                    job_element.xpath('.//a[@data-mapped]') or  # Traditional format
+                    job_element.xpath('.//a')                    # New format
+                )
+                
+                if not job_links:
+                    logging.debug("No job link found, skipping listing")
+                    continue
+                    
+                job_link = job_links[0]
                 job_url = job_link.get('href')
-                title = job_link.text.strip()
-                location = opening.xpath('.//span[@class="location"]/text()')[0].strip()
-                departments = opening.get('department_id', '').split(',')
-                department = departments[0] if departments else None
+                
+                # Extract title - handle both formats
+                title_elements = (
+                    job_link.xpath('.//p[contains(@class, "body--medium")]/text()[1]') or  # New format (first text node)
+                    job_link.xpath('.//text()[not(parent::span[@class="tag-text"])]')  # Traditional format, excluding "New" tag
+                )
+                # Clean up title
+                title = ' '.join(t.strip() for t in title_elements if t.strip())
+                title = re.sub(r'\s*New\s*', '', title)  # Remove any remaining "New" text
+                title = title.strip()
+                
+                # Extract location - handle both formats
+                location_elements = (
+                    job_element.xpath('.//span[@class="location"]/text()') or  # Traditional format
+                    job_element.xpath('.//p[contains(@class, "body--metadata")]/text()')  # New format
+                )
+                location = ' '.join(t.strip() for t in location_elements if t.strip())
+                
+                # Extract department
+                department = None
+                # Try traditional format first
+                departments = job_element.get('department_id', '').split(',')
+                if departments and departments[0]:
+                    # Try to get department name from mapping
+                    department = dept_map.get(departments[0], departments[0])
+                else:
+                    # For new format, look for nearest department header
+                    dept_header = job_element.xpath('./ancestor::div[contains(@class, "job-posts")][1]/preceding-sibling::h3[contains(@class, "section-header")][1]/text()')
+                    if dept_header:
+                        department = dept_header[0].strip()
                 
                 # Extract job ID from href
                 job_id = self._extract_job_id(job_url)
@@ -230,20 +280,24 @@ class GreenhouseSource(BaseSource):
                     logging.error(f"Could not extract job ID from URL: {job_url}")
                     continue
                 
+                # Create raw data with format information
+                raw_data = {
+                    'departments': [department] if department else [],
+                    'office_ids': job_element.get('office_id', '').split(','),
+                    'source': 'greenhouse',
+                    'source_id': source_id,
+                    'original_url': job_url,
+                    'scraped_at': datetime.utcnow().isoformat(),
+                    'format': 'table' if job_element.tag == 'tr' else 'div'
+                }
+                
                 listing = JobListing(
                     source_job_id=job_id,
                     title=title,
                     location=location,
                     department=department,
                     url=job_url,
-                    raw_data={
-                        'departments': departments,
-                        'office_ids': opening.get('office_id', '').split(','),
-                        'source': 'greenhouse',
-                        'source_id': source_id,
-                        'original_url': job_url,
-                        'scraped_at': datetime.utcnow().isoformat()
-                    }
+                    raw_data=raw_data
                 )
                 listings.append(listing)
                 
@@ -251,6 +305,9 @@ class GreenhouseSource(BaseSource):
                 logging.error(f"Error parsing job listing: {e}")
                 continue
                 
+        if not listings:
+            logging.warning(f"No job listings found for source_id: {source_id}")
+            
         return listings
     
     def get_job_detail_url(self, listing: Dict | JobListing, config: Optional[Dict] = None) -> str:
