@@ -422,20 +422,20 @@ def job_discovery_dag():
                             UPDATE company_sources 
                             SET last_scraped = %(now)s,
                                 next_scrape_time = %(next_scrape)s,
-                                config = CASE
+                                config = CASE 
                                     WHEN %(new_config)s::json IS NOT NULL THEN
-                                        jsonb_strip_nulls(
-                                            COALESCE(config, '{}'::json) ||
-                                            json_build_object(
-                                                'working_job_detail_pattern',
+                                        json_build_object(
+                                            'working_job_detail_pattern',
+                                            COALESCE(
                                                 (%(new_config)s::json->>'working_job_detail_pattern'),
-                                                'redirects_externally',
-                                                COALESCE(
-                                                    (%(new_config)s::json->>'redirects_externally')::boolean,
-                                                    (config->>'redirects_externally')::boolean,
-                                                    false
-                                                )
-                                            )::json
+                                                (config->>'working_job_detail_pattern')
+                                            ),
+                                            'redirects_externally',
+                                            COALESCE(
+                                                (%(new_config)s::json->>'redirects_externally')::boolean,
+                                                (config->>'redirects_externally')::boolean,
+                                                false
+                                            )
                                         )
                                     ELSE config
                                 END
