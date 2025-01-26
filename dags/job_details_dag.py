@@ -9,7 +9,7 @@ Scheduling Information:
 - Runs every hour
 - Does not perform catchup for missed intervals
 - High SQL concurrency for batch processing
-- Respects ScrapingBee's 5 concurrent request limit
+- Uses 'scraping_bee' pool to limit to 5 concurrent requests across all DAGs
 - Longer timeout per task for thorough processing
 """
 from datetime import datetime, timedelta
@@ -120,22 +120,29 @@ def job_details_dag():
         
         return chunked_jobs
 
-    @task
+    @task(pool='scraping_bee', pool_slots=1)
     def scrape_job_details(job: Dict) -> Dict:
         """
         Scrapes detailed information for a single job.
-        Rate limited by chunk_id to respect ScrapingBee's concurrent request limit.
+        Uses Airflow pool to ensure max 5 concurrent requests to ScrapingBee across all DAGs.
+        Properly handles rate limiting and updates job_scraping_issues on failures.
         
         Args:
             job: Job record to scrape details for.
             
         Returns:
             Dictionary with job details and structured data.
+            
+        Raises:
+            AirflowException: On rate limiting (429) to trigger retry
+            ValueError: On unsupported source types
         """
         if job['source_type'] == SourceType.GREENHOUSE.value:
             source_handler = GreenhouseSource()
         else:
             raise ValueError(f"Unsupported source type: {job['source_type']}")
+        
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         try:
             # Get job detail URL and scraping config
@@ -150,6 +157,28 @@ def job_details_dag():
             logging.info(f"Scraping details from {detail_url} (chunk {job['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
+                
+                # Handle rate limiting explicitly
+                if response.status_code == 429:
+                    error_msg = "Rate limited by ScrapingBee (429)"
+                    logging.warning(f"{error_msg} for job {job['job_id']}")
+                    
+                    # Update job_scraping_issues
+                    pg_hook.run("""
+                        INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
+                        VALUES (%(job_id)s, 1, NOW(), %(error)s)
+                        ON CONFLICT (job_id) DO UPDATE SET
+                            failure_count = job_scraping_issues.failure_count + 1,
+                            last_failure = NOW(),
+                            last_error = %(error)s
+                    """, parameters={
+                        'job_id': job['job_id'],
+                        'error': error_msg
+                    })
+                    
+                    from airflow.exceptions import AirflowException
+                    raise AirflowException(error_msg)
+                
                 response.raise_for_status()
                 
                 # Parse job details
@@ -182,6 +211,12 @@ def job_details_dag():
                 else:
                     details['raw_data'] = {'structured_data': structured_data}
                 
+                # Clear any previous issues on success
+                pg_hook.run("""
+                    DELETE FROM job_scraping_issues
+                    WHERE job_id = %(job_id)s
+                """, parameters={'job_id': job['job_id']})
+                
                 return {
                     'job_id': job['job_id'],
                     'details': details,
@@ -189,12 +224,24 @@ def job_details_dag():
                 }
                 
         except Exception as e:
-            logging.error(f"Error scraping job {job['job_id']}: {str(e)}")
-            return {
-                'job_id': job['job_id'],
-                'error': str(e),
-                'success': False
-            }
+            error_msg = str(e)
+            logging.error(f"Error scraping job {job['job_id']}: {error_msg}")
+            
+            # Don't update issues table for rate limiting as it's handled above
+            if not isinstance(e, AirflowException):
+                pg_hook.run("""
+                    INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
+                    VALUES (%(job_id)s, 1, NOW(), %(error)s)
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        failure_count = job_scraping_issues.failure_count + 1,
+                        last_failure = NOW(),
+                        last_error = %(error)s
+                """, parameters={
+                    'job_id': job['job_id'],
+                    'error': error_msg
+                })
+            
+            raise  # Re-raise to trigger task failure
 
     @task
     def save_job_details(result: Dict) -> None:
