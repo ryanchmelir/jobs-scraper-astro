@@ -436,7 +436,8 @@ def job_scraper_dag():
                     with conn.cursor() as cur:
                         try:
                             # Build a single query for all jobs using mogrify
-                            values_template = ','.join(['(%s)' for _ in range(len(job_tuples))])
+                            placeholders_per_row = ', '.join(['%s'] * len(target_fields))
+                            values_template = ','.join([f'({placeholders_per_row})' for _ in range(len(job_tuples))])
                             sql = f"""
                                 INSERT INTO jobs ({fields_str})
                                 VALUES {values_template}
