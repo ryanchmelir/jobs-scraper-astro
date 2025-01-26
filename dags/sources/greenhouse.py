@@ -7,6 +7,7 @@ from lxml import html
 import random
 import re
 from datetime import datetime
+import logging
 
 from .base import BaseSource, JobListing
 
@@ -207,46 +208,60 @@ class GreenhouseSource(BaseSource):
         # Try different header elements
         for header_tag in ['h2', 'h3', 'strong', 'b', 'p']:
             for header in section_headers:
-                # Try both exact and contains matches
-                elements = tree.xpath(f"//{header_tag}[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header.lower()}')]")
-                
-                for element in elements:
-                    # Get the parent section and next sibling sections
-                    section = element.getparent()
-                    if section is not None:
-                        # Try to find the content section
-                        content_sections = []
-                        current = element.getnext()
-                        while current is not None and not any(h.lower() in current.text_content().lower() for h in section_headers):
-                            content_sections.append(current)
-                            current = current.getnext()
-                        
-                        # Extract text content
-                        content = []
-                        # Look for bullet points first
-                        for section in content_sections:
-                            items = section.xpath('.//li')
-                            if items:
-                                new_items = [item.text_content().strip() for item in items]
-                                structured_items.extend(new_items)
-                                content.extend(new_items)
-                                confidence = 1.0  # Highest confidence for structured lists
-                            else:
-                                # Fall back to paragraphs
-                                paragraphs = section.xpath('.//p')
-                                if paragraphs:
-                                    content.extend(p.text_content().strip() for p in paragraphs)
-                                    confidence = 0.8  # Good confidence for paragraphs
+                try:
+                    # Use a simpler, more robust XPath expression
+                    # First try exact match (case-insensitive)
+                    xpath = f"//{header_tag}[translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = '{header.lower()}']"
+                    elements = tree.xpath(xpath)
+                    
+                    # If no exact match, try contains
+                    if not elements:
+                        # Escape single quotes in header text
+                        header_text = header.lower().replace("'", "''")
+                        xpath = f"//{header_tag}[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header_text}')]"
+                        elements = tree.xpath(xpath)
+                    
+                    for element in elements:
+                        # Get the parent section and next sibling sections
+                        section = element.getparent()
+                        if section is not None:
+                            # Try to find the content section
+                            content_sections = []
+                            current = element.getnext()
+                            while current is not None and not any(h.lower() in current.text_content().lower() for h in section_headers):
+                                content_sections.append(current)
+                                current = current.getnext()
+                            
+                            # Extract text content
+                            content = []
+                            # Look for bullet points first
+                            for section in content_sections:
+                                items = section.xpath('.//li')
+                                if items:
+                                    new_items = [item.text_content().strip() for item in items]
+                                    structured_items.extend(new_items)
+                                    content.extend(new_items)
+                                    confidence = 1.0  # Highest confidence for structured lists
                                 else:
-                                    # Last resort: all text content
-                                    text = section.text_content().strip()
-                                    if text:
-                                        content.append(text)
-                                        confidence = 0.5  # Lower confidence for unstructured text
-                        
-                        if confidence > max_confidence and content:
-                            max_confidence = confidence
-                            best_content = '\n'.join(content)
+                                    # Fall back to paragraphs
+                                    paragraphs = section.xpath('.//p')
+                                    if paragraphs:
+                                        content.extend(p.text_content().strip() for p in paragraphs)
+                                        confidence = 0.8  # Good confidence for paragraphs
+                                    else:
+                                        # Last resort: all text content
+                                        text = section.text_content().strip()
+                                        if text:
+                                            content.append(text)
+                                            confidence = 0.5  # Lower confidence for unstructured text
+                            
+                            if confidence > max_confidence and content:
+                                max_confidence = confidence
+                                best_content = '\n'.join(content)
+                
+                except lxml.etree.XPathEvalError as e:
+                    logging.warning(f"XPath error for header '{header}': {str(e)}")
+                    continue
         
         return best_content, structured_items, max_confidence
 
