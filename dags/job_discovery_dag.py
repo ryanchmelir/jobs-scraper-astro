@@ -202,7 +202,7 @@ def job_discovery_dag():
 
     @task
     def process_listings(source_and_listings) -> Dict[str, List[str]]:
-        """Identifies new and existing jobs."""
+        """Identifies new and existing jobs and validates URLs."""
         source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
@@ -221,6 +221,29 @@ def job_discovery_dag():
         new_jobs = scraped_job_ids - existing_job_ids
         removed_jobs = existing_job_ids - scraped_job_ids
         existing_jobs = scraped_job_ids & existing_job_ids
+        
+        # Validate URLs for new jobs
+        if source['source_type'] == SourceType.GREENHOUSE.value:
+            source_handler = GreenhouseSource()
+            working_patterns = set()
+            
+            for listing in listings:
+                if listing['source_job_id'] in new_jobs:
+                    try:
+                        # Validate and update URL
+                        listing['url'] = source_handler.get_job_detail_url(listing, source.get('config', {}))
+                        
+                        # Collect working patterns
+                        if pattern := listing.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
+                            working_patterns.add(pattern)
+                    except Exception as e:
+                        logging.warning(f"Failed to validate URL for job {listing['source_job_id']}: {str(e)}")
+            
+            # Update source config with working patterns
+            if working_patterns:
+                if source.get('config') is None:
+                    source['config'] = {}
+                source['config']['working_job_detail_patterns'] = list(working_patterns)
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
                     f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
@@ -353,9 +376,32 @@ def job_discovery_dag():
                     interval_minutes = cur.fetchone()[0] or 1440  # Default to 24 hours
                     next_scrape = now + timedelta(minutes=interval_minutes)
                     
-                    # Update source status
+                    # Update source status and config
                     if listings:
-                        # Success - clear any failure records
+                        # Success - clear any failure records and update config
+                        cur.execute("""
+                            UPDATE company_sources 
+                            SET last_scraped = %(now)s,
+                                next_scrape_time = %(next_scrape)s,
+                                config = CASE 
+                                    WHEN %(config)s::jsonb ? 'working_job_detail_patterns' 
+                                    THEN jsonb_set(
+                                        COALESCE(config, '{}'::jsonb),
+                                        '{working_job_detail_patterns}',
+                                        %(patterns)s::jsonb,
+                                        true
+                                    )
+                                    ELSE config
+                                END
+                            WHERE id = %(source_id)s
+                        """, {
+                            'source_id': source['id'],
+                            'now': now,
+                            'next_scrape': next_scrape,
+                            'config': json.dumps(source.get('config', {})),
+                            'patterns': json.dumps(source.get('config', {}).get('working_job_detail_patterns', []))
+                        })
+                        
                         cur.execute("""
                             DELETE FROM company_source_issues
                             WHERE company_source_id = %(source_id)s
@@ -370,18 +416,6 @@ def job_discovery_dag():
                                 failure_count = company_source_issues.failure_count + 1,
                                 last_failure = NOW()
                         """, {'source_id': source['id']})
-                    
-                    # Update source scrape times
-                    cur.execute("""
-                        UPDATE company_sources 
-                        SET last_scraped = %(now)s,
-                            next_scrape_time = %(next_scrape)s
-                        WHERE id = %(source_id)s
-                    """, {
-                        'source_id': source['id'],
-                        'now': now,
-                        'next_scrape': next_scrape
-                    })
                     
                     conn.commit()
                     

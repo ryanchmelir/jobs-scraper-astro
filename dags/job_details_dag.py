@@ -145,13 +145,8 @@ def job_details_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         try:
-            # Get job detail URL and scraping config
-            detail_url = source_handler.get_job_detail_url({
-                'source_job_id': job['source_job_id'],
-                'url': job['url'],
-                'raw_data': {'source_id': job['source_id']}
-            }, job.get('config', {}))
-            
+            # Use existing URL since it was validated during discovery
+            detail_url = job['url']
             scraping_config = source_handler.prepare_scraping_config(detail_url)
             
             logging.info(f"Scraping details from {detail_url} (chunk {job['chunk_id']})")
@@ -210,21 +205,6 @@ def job_details_dag():
                     details['raw_data']['structured_data'] = structured_data
                 else:
                     details['raw_data'] = {'structured_data': structured_data}
-                
-                # Update source config with working detail pattern
-                source_config = job.get('config', {})
-                if isinstance(source_config, str):
-                    source_config = json.loads(source_config)
-                source_config['working_job_detail_pattern'] = scraping_config['url']
-                
-                pg_hook.run("""
-                    UPDATE company_sources 
-                    SET config = %(config)s
-                    WHERE id = %(company_source_id)s
-                """, parameters={
-                    'company_source_id': job['company_source_id'],
-                    'config': json.dumps(source_config)
-                })
                 
                 # Clear any previous issues on success
                 pg_hook.run("""
