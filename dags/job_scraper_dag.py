@@ -528,31 +528,29 @@ def job_scraper_dag():
         })
 
     @task
-    def handle_source_failure(source: Dict) -> None:
-        """Increment failure count for a company source."""
+    def handle_source_success(source_and_listings) -> None:
+        """Handle source success/failure status based on listings result."""
+        source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+        
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO company_source_issues (company_source_id, failure_count, last_failure)
-                    VALUES (%(source_id)s, 1, NOW())
-                    ON CONFLICT (company_source_id) 
-                    DO UPDATE SET 
-                        failure_count = company_source_issues.failure_count + 1,
-                        last_failure = NOW()
-                """, {'source_id': source['id']})
-            conn.commit()
-
-    @task
-    def handle_source_success(source: Dict) -> None:
-        """Reset failure count for a company source."""
-        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
-        with pg_hook.get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM company_source_issues
-                    WHERE company_source_id = %(source_id)s
-                """, {'source_id': source['id']})
+                if listings:
+                    # Success case - delete any failure records
+                    cur.execute("""
+                        DELETE FROM company_source_issues
+                        WHERE company_source_id = %(source_id)s
+                    """, {'source_id': source['id']})
+                else:
+                    # Failure case - increment failure count
+                    cur.execute("""
+                        INSERT INTO company_source_issues (company_source_id, failure_count, last_failure)
+                        VALUES (%(source_id)s, 1, NOW())
+                        ON CONFLICT (company_source_id) 
+                        DO UPDATE SET 
+                            failure_count = company_source_issues.failure_count + 1,
+                            last_failure = NOW()
+                    """, {'source_id': source['id']})
             conn.commit()
 
     # Get sources to scrape
@@ -567,11 +565,8 @@ def job_scraper_dag():
     )
     
     # Handle success/failure based on listings result
-    success_handlers = handle_source_success.expand(
-        source=sources.zip(listings).filter(lambda x: x[1])
-    )
-    failure_handlers = handle_source_failure.expand(
-        source=sources.zip(listings).filter(lambda x: not x[1])
+    source_status_updates = handle_source_success.expand(
+        source_and_listings=sources.zip(listings)
     )
     
     # Handle new jobs for each source-changes-listings combination
@@ -590,7 +585,7 @@ def job_scraper_dag():
     # Set up dependencies between mapped tasks
     chain(
         listings,
-        [job_changes, success_handlers, failure_handlers],
+        [job_changes, source_status_updates],
         detailed_jobs,
         database_updates,
         scrape_time_updates
