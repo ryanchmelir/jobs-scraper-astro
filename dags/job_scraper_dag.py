@@ -231,21 +231,40 @@ def job_scraper_dag():
                                        params=source_handler.prepare_scraping_config(detail_url))
                     response.raise_for_status()
                     
-                    # Parse job details and merge with listing data
+                    # Parse job details with better error handling
                     job_details = source_handler.parse_job_details(response.text, listing)
+                    if not isinstance(job_details, dict):
+                        raise ValueError(f"Expected dictionary from parse_job_details, got {type(job_details)}")
+                    
+                    # Extract raw_data with validation
+                    raw_data = job_details.get('raw_data', {})
+                    if not isinstance(raw_data, dict):
+                        raw_data = {}
+                    
+                    # Get metadata with validation
+                    metadata = raw_data.get('metadata', {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    
+                    # Get salary range with validation
+                    salary_range = raw_data.get('salary_range', {})
+                    if not isinstance(salary_range, dict):
+                        salary_range = {}
+                    
+                    # Prepare job record with safe gets
                     detailed_job = {
                         **listing,
-                        'description': job_details['description'],
-                        'salary_min': job_details['raw_data'].get('salary_range', {}).get('min'),
-                        'salary_max': job_details['raw_data'].get('salary_range', {}).get('max'),
-                        'salary_currency': job_details['raw_data'].get('salary_range', {}).get('currency'),
-                        'employment_type': job_details['raw_data'].get('employment_type', 'UNKNOWN'),
-                        'remote_status': job_details['raw_data'].get('remote_status', 'UNKNOWN'),
-                        'requirements': job_details['raw_data'].get('requirements', []),
-                        'benefits': job_details['raw_data'].get('benefits', []),
-                        'raw_data': job_details['raw_data'],
+                        'description': job_details.get('description', ''),
+                        'salary_min': salary_range.get('min'),
+                        'salary_max': salary_range.get('max'),
+                        'salary_currency': salary_range.get('currency'),
+                        'employment_type': raw_data.get('employment_type', 'UNKNOWN'),
+                        'remote_status': raw_data.get('remote_status', 'UNKNOWN'),
+                        'requirements': raw_data.get('requirements', []),
+                        'benefits': raw_data.get('benefits', []),
+                        'raw_data': raw_data,
                         'metadata': {
-                            'confidence_scores': job_details['raw_data']['metadata']['confidence_scores'],
+                            'confidence_scores': metadata.get('confidence_scores', {}),
                             'parser_version': '1.0',
                             'last_parsed': datetime.utcnow().isoformat()
                         }
@@ -253,7 +272,7 @@ def job_scraper_dag():
                     detailed_jobs.append(detailed_job)
                     
             except Exception as e:
-                logging.error(f"Error scraping job details for {listing['id']}: {str(e)}")
+                logging.error(f"Error scraping job details for {listing['id']}: {str(e)}", exc_info=True)
                 # Continue with other jobs even if one fails
                 continue
                 
