@@ -222,62 +222,58 @@ def job_discovery_dag():
         removed_jobs = existing_job_ids - scraped_job_ids
         existing_jobs = scraped_job_ids & existing_job_ids
         
-        # Validate URLs for new jobs
+        # For Greenhouse sources, validate URLs efficiently
+        url_status = None
+        working_pattern = None
+        
         if source['source_type'] == SourceType.GREENHOUSE.value and new_jobs:
             source_handler = GreenhouseSource()
-            working_patterns = set()
             
-            # Test a few jobs to find working patterns (up to 3)
-            sample_size = min(3, len(new_jobs))
-            sample_jobs = list(new_jobs)[:sample_size]
+            # Test URL patterns with just one job to determine behavior
+            sample_job_id = next(iter(new_jobs))
+            sample_listing = next(l for l in listings if l['source_job_id'] == sample_job_id)
             
-            for job_id in sample_jobs:
-                listing = next(l for l in listings if l['source_job_id'] == job_id)
-                try:
-                    # Try to validate the URL
-                    listing['url'] = source_handler.get_job_detail_url(listing, source.get('config', {}))
-                    
-                    # If we get here, we found a working pattern
-                    if pattern := listing.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
-                        working_patterns.add(pattern)
-                except ValueError as e:
-                    if "302 redirect" in str(e).lower():
-                        # Mark this specific job as redirecting
+            # Get URL status for sample job
+            url, status, pattern = source_handler.get_job_detail_url(sample_listing, source.get('config', {}))
+            url_status = status
+            
+            # Update all listings based on the result
+            if status == '200':
+                # We found a working pattern - use it for all new jobs
+                working_pattern = pattern
+                for listing in listings:
+                    if listing['source_job_id'] in new_jobs:
+                        try:
+                            listing['url'] = pattern.format(
+                                company=source['source_id'],
+                                job_id=listing['source_job_id']
+                            )
+                            if not listing.get('raw_data'):
+                                listing['raw_data'] = {}
+                            listing['raw_data']['config'] = {'working_job_detail_pattern': pattern}
+                        except Exception as e:
+                            logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
+                            
+            elif status == '302':
+                # All jobs redirect externally - keep original URLs
+                for listing in listings:
+                    if listing['source_job_id'] in new_jobs:
                         if not listing.get('raw_data'):
                             listing['raw_data'] = {}
                         listing['raw_data']['redirects_externally'] = True
-                    else:
-                        logging.warning(f"Failed to validate URL for job {job_id}: {str(e)}")
+                        
+            else:
+                # No valid URLs - skip these jobs
+                new_jobs = set()
             
-            # Process remaining new jobs using discovered patterns
-            remaining_jobs = [j for j in new_jobs if j not in sample_jobs]
-            for job_id in remaining_jobs:
-                listing = next(l for l in listings if l['source_job_id'] == job_id)
-                
-                # Try each working pattern we found
-                url_found = False
-                for pattern in working_patterns:
-                    try:
-                        listing['url'] = pattern.format(
-                            company=source['source_id'],
-                            job_id=job_id
-                        )
-                        url_found = True
-                        break
-                    except Exception:
-                        continue
-                
-                # If no pattern worked, mark as redirecting
-                if not url_found:
-                    if not listing.get('raw_data'):
-                        listing['raw_data'] = {}
-                    listing['raw_data']['redirects_externally'] = True
+            # Update source config
+            if source.get('config') is None:
+                source['config'] = {}
             
-            # Update source config with working patterns if found
-            if working_patterns:
-                if source.get('config') is None:
-                    source['config'] = {}
-                source['config']['working_job_detail_patterns'] = list(working_patterns)
+            if working_pattern:
+                source['config']['working_job_detail_pattern'] = working_pattern
+            elif status == '302':
+                source['config']['redirects_externally'] = True
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
                     f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
@@ -285,7 +281,9 @@ def job_discovery_dag():
         return {
             'new_jobs': list(new_jobs),
             'removed_jobs': list(removed_jobs),
-            'existing_jobs': list(existing_jobs)
+            'existing_jobs': list(existing_jobs),
+            'url_status': url_status,
+            'working_pattern': working_pattern
         }
 
     @task
@@ -336,6 +334,7 @@ def job_discovery_dag():
                         for listing in new_job_listings:
                             # Don't mark jobs as needing details if they redirect externally
                             needs_details = not (
+                                job_changes.get('redirects_externally', False) or
                                 listing.get('raw_data', {}).get('redirects_externally', False)
                             )
                             
@@ -423,21 +422,29 @@ def job_discovery_dag():
                             UPDATE company_sources 
                             SET last_scraped = %(now)s,
                                 next_scrape_time = %(next_scrape)s,
-                                config = CASE 
-                                    WHEN (%(config)s::json->>'working_job_detail_patterns') IS NOT NULL
-                                    THEN json_build_object(
-                                        'working_job_detail_patterns', 
-                                        %(patterns)s::json
-                                    )::json
-                                    ELSE COALESCE(config, '{}'::json)
+                                config = CASE
+                                    WHEN %(new_config)s::json IS NOT NULL THEN
+                                        jsonb_strip_nulls(
+                                            COALESCE(config, '{}'::json) ||
+                                            json_build_object(
+                                                'working_job_detail_pattern',
+                                                (%(new_config)s::json->>'working_job_detail_pattern'),
+                                                'redirects_externally',
+                                                COALESCE(
+                                                    (%(new_config)s::json->>'redirects_externally')::boolean,
+                                                    (config->>'redirects_externally')::boolean,
+                                                    false
+                                                )
+                                            )::json
+                                        )
+                                    ELSE config
                                 END
                             WHERE id = %(source_id)s
                         """, {
                             'source_id': source['id'],
                             'now': now,
                             'next_scrape': next_scrape,
-                            'config': json.dumps(source.get('config', {})),
-                            'patterns': json.dumps(source.get('config', {}).get('working_job_detail_patterns', []))
+                            'new_config': json.dumps(source.get('config', {}))
                         })
                         
                         cur.execute("""

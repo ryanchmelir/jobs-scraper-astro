@@ -95,29 +95,29 @@ class GreenhouseSource(BaseSource):
         self.client = httpx.Client(timeout=10.0, follow_redirects=True)
         self.head_client = httpx.Client(timeout=10.0, follow_redirects=False)
     
-    def _check_url_head(self, url: str) -> Tuple[bool, Optional[str]]:
+    def _check_url_head(self, url: str) -> Tuple[bool, bool]:
         """
         Check if a URL is accessible and returns a Greenhouse page.
-        Returns (success, final_url).
+        Returns (success, redirects_externally).
         """
         try:
             response = self.head_client.head(url)
             
             # If it's a 200, this URL works
             if response.status_code == 200:
-                return True, url
+                return True, False
                 
             # If it's a redirect, check if it's redirecting to a non-Greenhouse domain
             if response.status_code == 302:
                 location = response.headers.get('location', '')
                 if not any(domain in location.lower() for domain in ['greenhouse.io', 'job-boards.greenhouse.io']):
-                    return False, None
+                    return False, True
                     
-            return False, None
+            return False, False
             
         except Exception as e:
             logging.debug(f"HEAD request failed for {url}: {str(e)}")
-            return False, None
+            return False, False
     
     def get_listings_url(self, company_id: str, config: Optional[Dict] = None) -> str:
         """Get the URL for the company's job listings page."""
@@ -293,94 +293,70 @@ class GreenhouseSource(BaseSource):
             
         return listings
     
-    def get_job_detail_url(self, listing: Dict | JobListing, config: Optional[Dict] = None) -> str:
-        """Get the URL for a specific job listing."""
+    def get_job_detail_url(self, listing: Dict | JobListing, config: Optional[Dict] = None) -> Tuple[str, str, Optional[str]]:
+        """
+        Get the URL for a specific job listing.
+        Returns (url, status, pattern) where:
+        - url is the best URL to use
+        - status is one of: '200' (working), '302' (redirect), 'invalid' (no working URL)
+        - pattern is the working pattern if status is '200', otherwise None
+        """
         config = config or {}
         
-        # Handle both Dict and JobListing objects
+        # Get job_id and company_id
         url = listing['url'] if isinstance(listing, dict) else listing.url
         job_id = self._extract_job_id(url)
-        
         if not job_id:
-            raise ValueError(f"Could not extract job_id from {url}")
+            return url, 'invalid', None
         
-        # Get company_id from raw_data or config
         company_id = None
         if isinstance(listing, dict):
             company_id = listing.get('raw_data', {}).get('source_id')
         else:
             company_id = getattr(listing, 'raw_data', {}).get('source_id')
         
-        # If not in raw_data, try to extract from URL (as fallback)
         if not company_id:
             company_id = self._extract_company_id(url)
-        
         if not company_id:
-            raise ValueError(f"No company_id available for job {job_id}")
+            return url, 'invalid', None
         
-        # Check for cached pattern first
+        # Check cached pattern first
         if cached_pattern := config.get('working_job_detail_pattern'):
             try:
-                url = cached_pattern.format(company=company_id, job_id=job_id)
-                success, _ = self._check_url_head(url)
+                test_url = cached_pattern.format(company=company_id, job_id=job_id)
+                success, redirect = self._check_url_head(test_url)
                 if success:
-                    logging.info(f"Using cached job detail pattern for {job_id}")
-                    return url
-                logging.warning(f"Cached job detail pattern failed for {job_id}, trying alternatives")
-            except Exception as e:
-                logging.warning(f"Error with cached job detail pattern: {str(e)}")
+                    return test_url, '200', cached_pattern
+                if redirect:
+                    return url, '302', None
+            except Exception:
+                pass
         
         # Check for known failed patterns
         failed_patterns = config.get('failed_job_detail_patterns', [])
         
-        # Try each pattern in order
+        # Try each pattern
         for pattern in self.JOB_DETAIL_URLS:
             if pattern in failed_patterns:
                 continue
             
             try:
-                url = pattern.format(company=company_id, job_id=job_id)
-                success, _ = self._check_url_head(url)
+                test_url = pattern.format(company=company_id, job_id=job_id)
+                success, redirect = self._check_url_head(test_url)
                 if success:
-                    # Store working pattern in raw_data for later persistence
-                    if isinstance(listing, dict):
-                        if 'raw_data' not in listing:
-                            listing['raw_data'] = {}
-                        if 'config' not in listing['raw_data']:
-                            listing['raw_data']['config'] = {}
-                        listing['raw_data']['config']['working_job_detail_pattern'] = pattern
-                    else:
-                        if not hasattr(listing, 'raw_data'):
-                            listing.raw_data = {}
-                        if 'config' not in listing.raw_data:
-                            listing.raw_data['config'] = {}
-                        listing.raw_data['config']['working_job_detail_pattern'] = pattern
-                    logging.info(f"Found working job detail pattern for {job_id}")
-                    return url
-            except Exception as e:
-                logging.debug(f"Pattern {pattern} failed: {str(e)}")
+                    return test_url, '200', pattern
+                if redirect:
+                    return url, '302', None
+            except Exception:
                 continue
         
-        # If we get here, add all patterns to failed_patterns in config
-        if isinstance(listing, dict):
-            if 'raw_data' not in listing:
-                listing['raw_data'] = {}
-            if 'config' not in listing['raw_data']:
-                listing['raw_data']['config'] = {}
-            listing['raw_data']['config']['failed_job_detail_patterns'] = self.JOB_DETAIL_URLS
-        else:
-            if not hasattr(listing, 'raw_data'):
-                listing.raw_data = {}
-            if 'config' not in listing.raw_data:
-                listing.raw_data['config'] = {}
-            listing.raw_data['config']['failed_job_detail_patterns'] = self.JOB_DETAIL_URLS
-        
-        # If no patterns work, raise an exception
-        raise ValueError(f"No working job detail pattern found for job {job_id}")
+        # If we get here, no patterns worked
+        return url, 'invalid', None
 
     def get_listing_url(self, listing: Dict | JobListing) -> str:
         """Get the URL for a job listing."""
-        return self.get_job_detail_url(listing)
+        url, _, _ = self.get_job_detail_url(listing)
+        return url
 
     def _extract_company_id(self, url: str) -> Optional[str]:
         """Extract company ID from URL."""
