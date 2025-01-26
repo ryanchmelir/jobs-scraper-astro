@@ -339,9 +339,8 @@ class GreenhouseSource(BaseSource):
         if cached_pattern := config.get('working_job_detail_pattern'):
             try:
                 url = cached_pattern.format(company=company_id, job_id=job_id)
-                # Use the client that follows redirects for job details
-                response = self.client.head(url)
-                if response.status_code == 200:
+                success, _ = self._check_url_head(url)
+                if success:
                     logging.info(f"Using cached job detail pattern for {job_id}")
                     return url
                 logging.warning(f"Cached job detail pattern failed for {job_id}, trying alternatives")
@@ -358,9 +357,8 @@ class GreenhouseSource(BaseSource):
             
             try:
                 url = pattern.format(company=company_id, job_id=job_id)
-                # Use the client that follows redirects for job details
-                response = self.client.head(url)
-                if response.status_code == 200:
+                success, _ = self._check_url_head(url)
+                if success:
                     # Store working pattern in raw_data for later persistence
                     if isinstance(listing, dict):
                         if 'raw_data' not in listing:
