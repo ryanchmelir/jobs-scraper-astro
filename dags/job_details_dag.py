@@ -51,7 +51,7 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'details'],
-    max_active_tasks=10,
+    max_active_tasks=5,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=2),
 )
