@@ -204,7 +204,7 @@ def job_scraper_dag():
                 response.raise_for_status()
                 
                 # Parse the listings page and convert to dictionaries
-                listings = source_handler.parse_listings_page(response.text)
+                listings = source_handler.parse_listings_page(response.text, source['source_id'])
                 listings_dict = [
                     {
                         'id': listing.source_job_id,

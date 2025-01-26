@@ -210,7 +210,7 @@ class GreenhouseSource(BaseSource):
             logging.debug(f"Error extracting job ID from {href}: {str(e)}")
             return None
 
-    def parse_listings_page(self, html_content: str) -> List[JobListing]:
+    def parse_listings_page(self, html_content: str, source_id: str) -> List[JobListing]:
         """Parse the Greenhouse job board HTML into JobListing objects."""
         listings = []
         tree = html.fromstring(html_content)
@@ -235,7 +235,7 @@ class GreenhouseSource(BaseSource):
                     title=title,
                     location=location,
                     department=department,
-                    url=self.JOB_DETAIL_URLS[0].format(company=job_url.split('/')[1], job_id=job_id),  # Use preferred URL format
+                    url=self.JOB_DETAIL_URLS[0].format(company=source_id, job_id=job_id),  # Use source_id from company source
                     raw_data={
                         'departments': departments,
                         'office_ids': opening.get('office_id', '').split(','),
@@ -258,11 +258,15 @@ class GreenhouseSource(BaseSource):
         
         # Handle both Dict and JobListing objects
         url = listing['url'] if isinstance(listing, dict) else listing.url
-        company_id = self._extract_company_id(url)
         job_id = self._extract_job_id(url)
         
-        if not job_id or not company_id:
-            raise ValueError(f"Could not extract job_id or company_id from {url}")
+        if not job_id:
+            raise ValueError(f"Could not extract job_id from {url}")
+        
+        # Get company_id from the URL - it should be the source_id that was used to create it
+        company_id = self._extract_company_id(url)
+        if not company_id:
+            raise ValueError(f"Could not extract company_id from {url}")
         
         # Check for cached pattern first
         if cached_pattern := config.get('working_job_detail_pattern'):
