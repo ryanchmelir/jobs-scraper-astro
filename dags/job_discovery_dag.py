@@ -384,14 +384,12 @@ def job_discovery_dag():
                             SET last_scraped = %(now)s,
                                 next_scrape_time = %(next_scrape)s,
                                 config = CASE 
-                                    WHEN %(config)s::jsonb ? 'working_job_detail_patterns' 
-                                    THEN jsonb_set(
-                                        COALESCE(config, '{}'::jsonb),
-                                        '{working_job_detail_patterns}',
-                                        %(patterns)s::jsonb,
-                                        true
-                                    )
-                                    ELSE COALESCE(config, '{}'::jsonb)
+                                    WHEN (%(config)s::json->>'working_job_detail_patterns') IS NOT NULL
+                                    THEN json_build_object(
+                                        'working_job_detail_patterns', 
+                                        %(patterns)s::json
+                                    )::json
+                                    ELSE COALESCE(config, '{}'::json)
                                 END
                             WHERE id = %(source_id)s
                         """, {
