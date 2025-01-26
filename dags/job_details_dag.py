@@ -211,6 +211,21 @@ def job_details_dag():
                 else:
                     details['raw_data'] = {'structured_data': structured_data}
                 
+                # Update source config with working detail pattern
+                source_config = job.get('config', {})
+                if isinstance(source_config, str):
+                    source_config = json.loads(source_config)
+                source_config['working_job_detail_pattern'] = scraping_config['url']
+                
+                pg_hook.run("""
+                    UPDATE company_sources 
+                    SET config = %(config)s
+                    WHERE id = %(company_source_id)s
+                """, parameters={
+                    'company_source_id': job['company_source_id'],
+                    'config': json.dumps(source_config)
+                })
+                
                 # Clear any previous issues on success
                 pg_hook.run("""
                     DELETE FROM job_scraping_issues
@@ -247,6 +262,7 @@ def job_details_dag():
     def save_job_details(result: Dict) -> None:
         """
         Saves scraped job details to the database.
+        Also updates company_sources config with working patterns.
         
         Args:
             result: Result from scraping job details.
@@ -278,6 +294,7 @@ def job_details_dag():
                                 needs_details = false,
                                 updated_at = %(now)s
                             WHERE id = %(job_id)s
+                            RETURNING company_source_id
                         """, {
                             'job_id': result['job_id'],
                             'title': details.get('title'),
@@ -293,6 +310,26 @@ def job_details_dag():
                             'remote_status': structured_data.get('remote_status'),
                             'now': now
                         })
+                        
+                        # Get company_source_id from the UPDATE
+                        company_source_id = cur.fetchone()[0]
+                        
+                        # Update company_sources config with working pattern if available
+                        if working_pattern := details.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
+                            cur.execute("""
+                                UPDATE company_sources
+                                SET config = jsonb_set(
+                                    CASE 
+                                        WHEN config IS NULL THEN '{}'::jsonb
+                                        WHEN config::text = '' THEN '{}'::jsonb
+                                        ELSE config::jsonb
+                                    END,
+                                    '{working_job_detail_pattern}',
+                                    %s::jsonb,
+                                    true
+                                )
+                                WHERE id = %s
+                            """, (json.dumps(working_pattern), company_source_id))
                         
                         # Clear any scraping issues
                         cur.execute("""
