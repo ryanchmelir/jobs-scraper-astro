@@ -193,7 +193,7 @@ def job_scraper_dag():
             raise ValueError(f"Unsupported source type: {source['source_type']}")
         
         # Get the listings URL and scraping config
-        listings_url = source_handler.get_listings_url(source['source_id'])
+        listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
         scraping_config = source_handler.prepare_scraping_config(listings_url)
         
         try:
@@ -208,7 +208,7 @@ def job_scraper_dag():
                 listings_dict = [
                     {
                         'id': listing.source_job_id,
-                        'source_job_id': listing.source_job_id,  # Store explicitly for URL construction
+                        'source_job_id': listing.source_job_id,
                         'title': listing.title,
                         'location': listing.location,
                         'department': listing.department,
@@ -217,6 +217,23 @@ def job_scraper_dag():
                     }
                     for listing in listings
                 ]
+                
+                # If successful, update the config with working URL pattern
+                if source.get('config') is None:
+                    source['config'] = {}
+                source['config']['working_url_pattern'] = scraping_config['url']
+                
+                # Update the source config in the database
+                pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+                pg_hook.run("""
+                    UPDATE company_sources 
+                    SET config = %(config)s
+                    WHERE id = %(source_id)s
+                """, parameters={
+                    'source_id': source['id'],
+                    'config': json.dumps(source['config'])
+                })
+                
                 logging.info(f"Found {len(listings_dict)} listings")
                 return listings_dict
                 

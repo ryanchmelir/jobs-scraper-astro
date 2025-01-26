@@ -2,7 +2,7 @@
 Greenhouse job board source implementation.
 Uses ScrapingBee for fetching pages and lxml for parsing.
 """
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional
 from lxml import html
 import re
 from datetime import datetime
@@ -10,6 +10,7 @@ import logging
 import html2text
 import time
 from threading import Lock
+import httpx
 
 from .base import BaseSource, JobListing
 
@@ -49,6 +50,14 @@ class GreenhouseSource(BaseSource):
     # Class-level rate limiter: 10 requests per minute
     _rate_limiter = RateLimiter(calls=10, period=60.0)
     
+    # URL patterns for Greenhouse job boards
+    BASE_URLS = [
+        "https://boards.greenhouse.io/{company}",
+        "https://job-boards.greenhouse.io/{company}",
+        "https://boards.greenhouse.io/embed/job_board?for={company}",
+        "https://job-boards.greenhouse.io/embed/job_board?for={company}"
+    ]
+    
     def __init__(self):
         super().__init__()
         self.html_converter = html2text.HTML2Text()
@@ -58,6 +67,7 @@ class GreenhouseSource(BaseSource):
         self.html_converter.protect_links = True  # Don't wrap links
         self.html_converter.unicode_snob = True  # Use Unicode
         self.html_converter.ul_item_mark = '-'  # Use - for unordered lists
+        self.client = httpx.Client(timeout=10.0, follow_redirects=True)
     
     # Employment and remote work patterns
     EMPLOYMENT_PATTERNS = [
@@ -92,21 +102,53 @@ class GreenhouseSource(BaseSource):
         r'([A-Z][a-zA-Z\s]+,\s+[A-Z][a-zA-Z\s]+)'  # City, Country
     ]
 
-    def get_listings_url(self, company_source_id: str) -> str:
-        """Get the URL for a company's Greenhouse job board."""
-        return f"https://boards.greenhouse.io/{company_source_id}"
+    def _check_url_head(self, url: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if a URL is accessible and get its final redirect location.
+        Returns (success, final_url).
+        """
+        try:
+            response = self.client.head(url)
+            if response.status_code == 200:
+                return True, str(response.url)
+            return False, None
+        except Exception as e:
+            logging.debug(f"HEAD request failed for {url}: {str(e)}")
+            return False, None
+    
+    def get_listings_url(self, company_id: str, config: Optional[Dict] = None) -> str:
+        """
+        Get the job listings URL for a company, trying different patterns if needed.
+        Caches working URL pattern in config if successful.
+        """
+        # Check if we have a cached working URL pattern
+        if config and config.get('working_url_pattern'):
+            url = config['working_url_pattern'].format(company=company_id)
+            success, final_url = self._check_url_head(url)
+            if success:
+                return final_url
+        
+        # Try each URL pattern
+        for url_pattern in self.BASE_URLS:
+            url = url_pattern.format(company=company_id)
+            success, final_url = self._check_url_head(url)
+            if success:
+                # Update config with working pattern if we can
+                if config is not None:
+                    config['working_url_pattern'] = url_pattern
+                return final_url
+        
+        # If all patterns fail, return the first pattern as fallback
+        return self.BASE_URLS[0].format(company=company_id)
     
     def _make_request(self, url: str) -> str:
         """Make a rate-limited request to ScrapingBee."""
-        import httpx
-        
         # Acquire rate limit token
         self._rate_limiter.acquire()
         
         # Make the request
-        with httpx.Client(timeout=30.0) as client:
-            response = client.get('https://app.scrapingbee.com/api/v1/',
-                              params=self.prepare_scraping_config(url))
+        with self.client as client:
+            response = client.get(url)
             response.raise_for_status()
             return response.text
 
@@ -312,7 +354,7 @@ class GreenhouseSource(BaseSource):
                 'active': False
             }
     
-    def prepare_scraping_config(self, url: str) -> dict:
+    def prepare_scraping_config(self, url: str) -> Dict:
         """Prepare configuration for ScrapingBee API with Greenhouse-specific settings."""
         config = super().prepare_scraping_config(url)
         config['api_key'] = SCRAPING_BEE_API_KEY
