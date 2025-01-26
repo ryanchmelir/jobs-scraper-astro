@@ -212,7 +212,7 @@ def job_scraper_dag():
                         'title': listing.title,
                         'location': listing.location,
                         'department': listing.department,
-                        'url': source_handler.get_listing_url(listing),
+                        'url': listing.url,  # Use the original URL from parse_listings_page
                         'raw_data': listing.raw_data
                     }
                     for listing in listings

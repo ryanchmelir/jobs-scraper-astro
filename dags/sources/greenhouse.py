@@ -235,7 +235,7 @@ class GreenhouseSource(BaseSource):
                     title=title,
                     location=location,
                     department=department,
-                    url=self.JOB_DETAIL_URLS[0].format(company=source_id, job_id=job_id),  # Use source_id from company source
+                    url=job_url,  # Store the original URL
                     raw_data={
                         'departments': departments,
                         'office_ids': opening.get('office_id', '').split(','),
