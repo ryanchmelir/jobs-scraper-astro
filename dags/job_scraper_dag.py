@@ -132,7 +132,7 @@ def job_scraper_dag():
     @task
     def get_company_sources_to_scrape(batch_size: int = 10) -> List[Dict]:
         """
-        Selects company sources that are due for scraping.
+        Selects company sources that are due for scraping and haven't failed too many times.
         
         Args:
             batch_size: Maximum number of sources to scrape in one run.
@@ -142,18 +142,23 @@ def job_scraper_dag():
         """
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
-        # Query for active sources that are due for scraping
+        # Query for active sources that are due for scraping and haven't failed too many times
         sql = """
             SELECT 
-                id,
-                company_id,
-                source_type,
-                source_id,
-                config
-            FROM company_sources 
-            WHERE active = true 
-            AND (next_scrape_time <= NOW() OR next_scrape_time IS NULL)
+                cs.id,
+                cs.company_id,
+                cs.source_type,
+                cs.source_id,
+                cs.config,
+                COALESCE(csi.failure_count, 0) as failure_count
+            FROM company_sources cs
+            LEFT JOIN company_source_issues csi ON cs.id = csi.company_source_id
+            WHERE cs.active = true 
+            AND (cs.next_scrape_time <= NOW() OR cs.next_scrape_time IS NULL)
+            AND (csi.failure_count IS NULL OR csi.failure_count < 3)
+            ORDER BY cs.next_scrape_time ASC
             LIMIT %(batch_size)s
+            FOR UPDATE OF cs SKIP LOCKED
         """
         sources = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
         
@@ -164,7 +169,8 @@ def job_scraper_dag():
                 'company_id': source[1],
                 'source_type': source[2],
                 'source_id': source[3],
-                'config': source[4]
+                'config': source[4],
+                'failure_count': source[5]
             }
             for source in sources
         ]
@@ -521,6 +527,34 @@ def job_scraper_dag():
             'next_scrape': next_scrape
         })
 
+    @task
+    def handle_source_failure(source: Dict) -> None:
+        """Increment failure count for a company source."""
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+        with pg_hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO company_source_issues (company_source_id, failure_count, last_failure)
+                    VALUES (%(source_id)s, 1, NOW())
+                    ON CONFLICT (company_source_id) 
+                    DO UPDATE SET 
+                        failure_count = company_source_issues.failure_count + 1,
+                        last_failure = NOW()
+                """, {'source_id': source['id']})
+            conn.commit()
+
+    @task
+    def handle_source_success(source: Dict) -> None:
+        """Reset failure count for a company source."""
+        pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+        with pg_hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM company_source_issues
+                    WHERE company_source_id = %(source_id)s
+                """, {'source_id': source['id']})
+            conn.commit()
+
     # Get sources to scrape
     sources = get_company_sources_to_scrape()
     
@@ -531,6 +565,13 @@ def job_scraper_dag():
     job_changes = process_listings.expand(
         source_and_listings=sources.zip(listings)
     )
+    
+    # Handle success/failure based on listings result
+    for source, listing in sources.zip(listings):
+        if listing:
+            handle_source_success.expand(source=source)
+        else:
+            handle_source_failure.expand(source=source)
     
     # Handle new jobs for each source-changes-listings combination
     detailed_jobs = handle_new_jobs.expand(
@@ -546,10 +587,9 @@ def job_scraper_dag():
     scrape_time_updates = update_scrape_time.expand(source=sources)
     
     # Set up dependencies between mapped tasks
-    # Each mapped instance will maintain its own chain
     chain(
         listings,
-        job_changes,
+        [job_changes, handle_source_success, handle_source_failure],
         detailed_jobs,
         database_updates,
         scrape_time_updates

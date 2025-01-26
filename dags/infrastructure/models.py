@@ -27,6 +27,18 @@ class RemoteStatus(str, Enum):
     FLEXIBLE = "FLEXIBLE"
     UNKNOWN = "UNKNOWN"
 
+class CompanySourceIssues(Base):
+    """Tracks failure counts for company sources."""
+    __tablename__ = 'company_source_issues'
+    
+    id = Column(Integer, primary_key=True)
+    company_source_id = Column(Integer, ForeignKey('company_sources.id'), nullable=False)
+    failure_count = Column(Integer, default=0)
+    last_failure = Column(DateTime, nullable=True)
+    
+    # Relationship
+    company_source = relationship("CompanySource", back_populates="issues")
+
 class CompanySource(Base):
     __tablename__ = 'company_sources'
     
@@ -40,8 +52,10 @@ class CompanySource(Base):
     next_scrape_time = Column(DateTime)
     scrape_interval = Column(Integer, default=1440)
     
+    # Relationships
     company = relationship("Company", back_populates="sources")
     jobs = relationship("Job", back_populates="company_source")
+    issues = relationship("CompanySourceIssues", back_populates="company_source", uselist=False)
     
     __table_args__ = (
         sa.UniqueConstraint('source_type', 'source_id', name='uix_source_id'),
