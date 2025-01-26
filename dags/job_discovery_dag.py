@@ -45,7 +45,7 @@ default_args = {
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
     max_active_tasks=20,  # High SQL concurrency
-    max_active_runs=3,
+    max_active_runs=1,
     dagrun_timeout=timedelta(minutes=30),
 )
 def job_discovery_dag():
@@ -442,8 +442,8 @@ def job_discovery_dag():
                                         json_build_object(
                                             'working_url_pattern', 
                                             COALESCE(
-                                                config->>'working_url_pattern',
-                                                %(new_config)s::json->>'working_url_pattern'
+                                                %(new_config)s::json->>'working_url_pattern',
+                                                config->>'working_url_pattern'
                                             ),
                                             'working_job_detail_pattern',
                                             COALESCE(
