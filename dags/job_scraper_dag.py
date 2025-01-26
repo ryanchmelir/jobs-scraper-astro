@@ -428,57 +428,63 @@ def job_scraper_dag():
             if job_tuples:  # Only attempt insert if we have jobs to insert
                 # Create the INSERT statement with ON CONFLICT DO UPDATE
                 fields_str = ', '.join(target_fields)
-                placeholders = ', '.join(['%s'] * len(target_fields))
                 update_fields = [f for f in target_fields if f not in ('company_source_id', 'source_job_id')]
                 update_str = ', '.join([f"{f} = EXCLUDED.{f}" for f in update_fields])
-                
-                sql = f"""
-                    INSERT INTO jobs ({fields_str})
-                    VALUES ({placeholders})
-                    ON CONFLICT (company_source_id, source_job_id) 
-                    DO UPDATE SET {update_str}
-                    RETURNING id, source_job_id
-                """
                 
                 # Execute with raw SQL to handle JSON fields properly
                 with pg_hook.get_conn() as conn:
                     with conn.cursor() as cur:
                         try:
-                            # Insert jobs and get their IDs
-                            cur.executemany(sql, job_tuples)
-                            job_ids = cur.fetchall()  # Get the returned IDs
+                            # Build a single query for all jobs using mogrify
+                            values_template = ','.join(['(%s)' for _ in range(len(job_tuples))])
+                            sql = f"""
+                                INSERT INTO jobs ({fields_str})
+                                VALUES {values_template}
+                                ON CONFLICT (company_source_id, source_job_id) 
+                                DO UPDATE SET {update_str}
+                                RETURNING id, source_job_id;
+                            """
+                            
+                            # Flatten job_tuples into a single list of parameters
+                            params = [item for job_tuple in job_tuples for item in job_tuple]
+                            
+                            # Execute single query and get results
+                            cur.execute(sql, params)
+                            job_ids = cur.fetchall()
                             
                             # Create a mapping of source_job_id to job_id
                             job_id_map = {row[1]: row[0] for row in job_ids}
                             
                             # Insert metadata with job_ids
-                            metadata_sql = """
-                                INSERT INTO job_metadata 
-                                (job_id, confidence_scores, parser_version, last_parsed, parse_count)
-                                VALUES (%s, %s, %s, %s, %s)
-                                ON CONFLICT (job_id) 
-                                DO UPDATE SET
-                                    confidence_scores = EXCLUDED.confidence_scores,
-                                    parser_version = EXCLUDED.parser_version,
-                                    last_parsed = EXCLUDED.last_parsed,
-                                    parse_count = job_metadata.parse_count + 1
-                            """
-                            
-                            # Create metadata tuples with job_ids
-                            metadata_values = [
-                                (
-                                    job_id_map[m['source_job_id']],
-                                    m['confidence_scores'],
-                                    m['parser_version'],
-                                    m['last_parsed'],
-                                    m['parse_count']
-                                )
-                                for m in metadata_tuples
-                                if m['source_job_id'] in job_id_map
-                            ]
-                            
-                            # Insert metadata
-                            cur.executemany(metadata_sql, metadata_values)
+                            if metadata_tuples:
+                                metadata_values_template = ','.join(['(%s, %s, %s, %s, %s)' for _ in metadata_tuples])
+                                metadata_sql = f"""
+                                    INSERT INTO job_metadata 
+                                    (job_id, confidence_scores, parser_version, last_parsed, parse_count)
+                                    VALUES {metadata_values_template}
+                                    ON CONFLICT (job_id) 
+                                    DO UPDATE SET
+                                        confidence_scores = EXCLUDED.confidence_scores,
+                                        parser_version = EXCLUDED.parser_version,
+                                        last_parsed = EXCLUDED.last_parsed,
+                                        parse_count = job_metadata.parse_count + 1
+                                """
+                                
+                                # Create metadata tuples with job_ids
+                                metadata_params = []
+                                for m in metadata_tuples:
+                                    if m['source_job_id'] in job_id_map:
+                                        metadata_params.extend([
+                                            job_id_map[m['source_job_id']],
+                                            m['confidence_scores'],
+                                            m['parser_version'],
+                                            m['last_parsed'],
+                                            m['parse_count']
+                                        ])
+                                
+                                # Insert metadata
+                                if metadata_params:
+                                    cur.execute(metadata_sql, metadata_params)
                             
                             conn.commit()
                             logging.info(f"Inserted/updated {len(job_tuples)} jobs and their metadata for source {source['id']}")
