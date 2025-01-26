@@ -226,62 +226,58 @@ def job_discovery_dag():
         if source['source_type'] == SourceType.GREENHOUSE.value and new_jobs:
             source_handler = GreenhouseSource()
             working_patterns = set()
-            redirecting_to_external = False
             
-            # Test URL patterns with just one job to determine behavior
-            sample_job_id = next(iter(new_jobs))
-            sample_listing = next(l for l in listings if l['source_job_id'] == sample_job_id)
+            # Test a few jobs to find working patterns (up to 3)
+            sample_size = min(3, len(new_jobs))
+            sample_jobs = list(new_jobs)[:sample_size]
             
-            try:
-                # Try to validate the sample job's URL
-                sample_listing['url'] = source_handler.get_job_detail_url(sample_listing, source.get('config', {}))
+            for job_id in sample_jobs:
+                listing = next(l for l in listings if l['source_job_id'] == job_id)
+                try:
+                    # Try to validate the URL
+                    listing['url'] = source_handler.get_job_detail_url(listing, source.get('config', {}))
+                    
+                    # If we get here, we found a working pattern
+                    if pattern := listing.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
+                        working_patterns.add(pattern)
+                except ValueError as e:
+                    if "302 redirect" in str(e).lower():
+                        # Mark this specific job as redirecting
+                        if not listing.get('raw_data'):
+                            listing['raw_data'] = {}
+                        listing['raw_data']['redirects_externally'] = True
+                    else:
+                        logging.warning(f"Failed to validate URL for job {job_id}: {str(e)}")
+            
+            # Process remaining new jobs using discovered patterns
+            remaining_jobs = [j for j in new_jobs if j not in sample_jobs]
+            for job_id in remaining_jobs:
+                listing = next(l for l in listings if l['source_job_id'] == job_id)
                 
-                # If we get here, we found a working pattern
-                if pattern := sample_listing.get('raw_data', {}).get('config', {}).get('working_job_detail_pattern'):
-                    working_patterns.add(pattern)
-                    
-                    # Apply the working pattern to all other new jobs
-                    for listing in listings:
-                        if listing['source_job_id'] in new_jobs and listing['source_job_id'] != sample_job_id:
-                            try:
-                                listing['url'] = pattern.format(
-                                    company=source['source_id'],
-                                    job_id=listing['source_job_id']
-                                )
-                            except Exception as e:
-                                logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
-                                
-            except ValueError as e:
-                if "302 redirect" in str(e).lower():
-                    # If we're getting redirects, assume all jobs redirect externally
-                    redirecting_to_external = True
-                    logging.info(f"Source {source['id']} appears to redirect job listings externally")
-                    
-                    # Update all listings with their redirect URLs
-                    for listing in listings:
-                        if listing['source_job_id'] in new_jobs:
-                            try:
-                                # Use the URL from the listing page since we can't get detail page
-                                listing['url'] = listing.get('url', '')
-                                if not listing.get('raw_data'):
-                                    listing['raw_data'] = {}
-                                listing['raw_data']['redirects_externally'] = True
-                            except Exception as e:
-                                logging.warning(f"Failed to process external URL for job {listing['source_job_id']}: {str(e)}")
-                else:
-                    logging.warning(f"Failed to validate URLs for source {source['id']}: {str(e)}")
+                # Try each working pattern we found
+                url_found = False
+                for pattern in working_patterns:
+                    try:
+                        listing['url'] = pattern.format(
+                            company=source['source_id'],
+                            job_id=job_id
+                        )
+                        url_found = True
+                        break
+                    except Exception:
+                        continue
+                
+                # If no pattern worked, mark as redirecting
+                if not url_found:
+                    if not listing.get('raw_data'):
+                        listing['raw_data'] = {}
+                    listing['raw_data']['redirects_externally'] = True
             
             # Update source config with working patterns if found
             if working_patterns:
                 if source.get('config') is None:
                     source['config'] = {}
                 source['config']['working_job_detail_patterns'] = list(working_patterns)
-            
-            # If redirecting externally, update source config to indicate this
-            if redirecting_to_external:
-                if source.get('config') is None:
-                    source['config'] = {}
-                source['config']['redirects_externally'] = True
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
                     f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
@@ -289,8 +285,7 @@ def job_discovery_dag():
         return {
             'new_jobs': list(new_jobs),
             'removed_jobs': list(removed_jobs),
-            'existing_jobs': list(existing_jobs),
-            'redirects_externally': redirecting_to_external if source['source_type'] == SourceType.GREENHOUSE.value else False
+            'existing_jobs': list(existing_jobs)
         }
 
     @task
@@ -341,7 +336,6 @@ def job_discovery_dag():
                         for listing in new_job_listings:
                             # Don't mark jobs as needing details if they redirect externally
                             needs_details = not (
-                                job_changes.get('redirects_externally', False) or
                                 listing.get('raw_data', {}).get('redirects_externally', False)
                             )
                             
