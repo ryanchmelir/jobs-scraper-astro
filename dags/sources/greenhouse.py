@@ -2,9 +2,10 @@
 Greenhouse job board source implementation.
 Uses ScrapingBee for fetching pages and lxml for parsing.
 """
-from typing import List
+from typing import List, Dict, Optional, Tuple
 from lxml import html
 import random
+import re
 from datetime import datetime
 
 from .base import BaseSource, JobListing
@@ -17,6 +18,64 @@ except ImportError:
 class GreenhouseSource(BaseSource):
     """Implementation of BaseSource for Greenhouse job boards."""
     
+    # Common section headers for job details
+    REQUIREMENTS_HEADERS = [
+        "Requirements", 
+        "What you'll bring",
+        "Skills",
+        "Qualifications",
+        "Who you are",
+        "Skills and Experience",
+        "Required Qualifications",
+        "Preferred Qualifications",
+        "Experience",
+        "About You"
+    ]
+    
+    BENEFITS_HEADERS = [
+        "Benefits",
+        "What we offer",
+        "What We Give You",
+        "Perks",
+        "Why work here",
+        "What We Give You",
+        "Compensation",
+        "Total Rewards",
+        "What you'll get",
+        "Package"
+    ]
+
+    DESCRIPTION_HEADERS = [
+        "About the role",
+        "Role Overview",
+        "Position Summary",
+        "Job Summary",
+        "The Role",
+        "The Opportunity"
+    ]
+
+    # Employment and remote work patterns
+    EMPLOYMENT_PATTERNS = [
+        r'(full[- ]time|part[- ]time)',
+        r'(permanent|contract|temporary)',
+        r'(internship|co-op)',
+        r'(\d+|full)[- ]time equivalent'
+    ]
+
+    REMOTE_PATTERNS = [
+        r'(remote|hybrid|office[- ]first)',
+        r'(in[- ]office|on[- ]site)',
+        r'(work[- ]from[- ]home|wfh)',
+        r'(\d+\s*days?\s*(in|remote))'
+    ]
+
+    SALARY_PATTERNS = [
+        r'\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?(?:\s*[-–]\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?)?',
+        r'~\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?',
+        r'Salary:\s*\$?(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)[k+]?',
+        r'(\d{2,3})[k+](?:\s*-\s*(\d{2,3})[k+])?'
+    ]
+
     def get_listings_url(self, company_source_id: str) -> str:
         """
         Get the URL for a company's Greenhouse job board.
@@ -110,6 +169,189 @@ class GreenhouseSource(BaseSource):
         """
         return self.get_listing_url(listing)
     
+    def _extract_with_fallbacks(self, tree: html.HtmlElement, xpaths: List[str], default: Optional[str] = None) -> Tuple[str, float]:
+        """
+        Try multiple XPath selectors and return the first match with confidence score.
+        
+        Args:
+            tree: HTML element tree
+            xpaths: List of XPath selectors to try
+            default: Default value if no matches found
+            
+        Returns:
+            Tuple of (extracted_value, confidence_score)
+        """
+        for xpath in xpaths:
+            elements = tree.xpath(xpath)
+            if elements:
+                # Higher confidence for earlier xpaths in the list
+                confidence = 1.0 - (xpaths.index(xpath) * 0.1)
+                return elements[0].strip() if isinstance(elements[0], str) else elements[0].text_content().strip(), confidence
+        return default or "", 0.0
+
+    def _extract_section_content(self, tree: html.HtmlElement, section_headers: List[str]) -> Tuple[str, List[str], float]:
+        """
+        Extract content from a section identified by common headers.
+        
+        Args:
+            tree: HTML element tree
+            section_headers: List of possible section header texts
+            
+        Returns:
+            Tuple of (raw_text, structured_items, confidence_score)
+        """
+        max_confidence = 0.0
+        best_content = ""
+        structured_items = []
+        
+        # Try different header elements
+        for header_tag in ['h2', 'h3', 'strong', 'b', 'p']:
+            for header in section_headers:
+                # Try both exact and contains matches
+                elements = tree.xpath(f"//{header_tag}[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header.lower()}')]")
+                
+                for element in elements:
+                    # Get the parent section and next sibling sections
+                    section = element.getparent()
+                    if section is not None:
+                        # Try to find the content section
+                        content_sections = []
+                        current = element.getnext()
+                        while current is not None and not any(h.lower() in current.text_content().lower() for h in section_headers):
+                            content_sections.append(current)
+                            current = current.getnext()
+                        
+                        # Extract text content
+                        content = []
+                        # Look for bullet points first
+                        for section in content_sections:
+                            items = section.xpath('.//li')
+                            if items:
+                                new_items = [item.text_content().strip() for item in items]
+                                structured_items.extend(new_items)
+                                content.extend(new_items)
+                                confidence = 1.0  # Highest confidence for structured lists
+                            else:
+                                # Fall back to paragraphs
+                                paragraphs = section.xpath('.//p')
+                                if paragraphs:
+                                    content.extend(p.text_content().strip() for p in paragraphs)
+                                    confidence = 0.8  # Good confidence for paragraphs
+                                else:
+                                    # Last resort: all text content
+                                    text = section.text_content().strip()
+                                    if text:
+                                        content.append(text)
+                                        confidence = 0.5  # Lower confidence for unstructured text
+                        
+                        if confidence > max_confidence and content:
+                            max_confidence = confidence
+                            best_content = '\n'.join(content)
+        
+        return best_content, structured_items, max_confidence
+
+    def _extract_salary_range(self, tree: html.HtmlElement) -> Tuple[Optional[Dict[str, int]], float]:
+        """
+        Extract salary range information if available.
+        
+        Args:
+            tree: HTML element tree
+            
+        Returns:
+            Tuple of (salary_dict, confidence_score)
+        """
+        salary_dict = None
+        confidence = 0.0
+        
+        # Try to find salary information in various locations
+        salary_containers = [
+            "//div[contains(@class, 'pay-range')]",
+            "//p[contains(translate(text(), 'SALARY', 'salary'), 'salary')]",
+            "//li[contains(translate(text(), 'SALARY', 'salary'), 'salary')]",
+            "//div[contains(@class, 'compensation')]"
+        ]
+        
+        for container in salary_containers:
+            elements = tree.xpath(container)
+            if elements:
+                text = elements[0].text_content()
+                
+                # Try different salary patterns
+                for pattern in self.SALARY_PATTERNS:
+                    matches = re.findall(pattern, text, re.IGNORECASE)
+                    if matches:
+                        try:
+                            if isinstance(matches[0], tuple):
+                                # Range found
+                                min_salary = matches[0][0].replace(',', '').replace('k', '000')
+                                max_salary = matches[0][1].replace(',', '').replace('k', '000') if matches[0][1] else min_salary
+                            else:
+                                # Single value found
+                                min_salary = max_salary = matches[0].replace(',', '').replace('k', '000')
+                            
+                            salary_dict = {
+                                'min': int(float(min_salary)),
+                                'max': int(float(max_salary)),
+                                'currency': 'USD' if '$' in text else None
+                            }
+                            confidence = 1.0 if '$' in text else 0.8
+                            break
+                        except (ValueError, IndexError):
+                            continue
+                
+                if salary_dict:
+                    break
+                
+        return salary_dict, confidence
+
+    def _extract_employment_info(self, text: str) -> Tuple[Optional[str], Optional[str], float]:
+        """
+        Extract employment type and remote work status from text.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            Tuple of (employment_type, remote_status, confidence_score)
+        """
+        employment_type = None
+        remote_status = None
+        confidence = 0.0
+        
+        # Employment type mapping
+        employment_map = {
+            'full-time': 'FULL_TIME',
+            'part-time': 'PART_TIME',
+            'contract': 'CONTRACT',
+            'internship': 'INTERNSHIP'
+        }
+        
+        # Remote status mapping
+        remote_map = {
+            'remote': 'REMOTE',
+            'hybrid': 'HYBRID',
+            'office': 'OFFICE',
+            'flexible': 'FLEXIBLE'
+        }
+        
+        # Check employment patterns and normalize
+        for pattern in self.EMPLOYMENT_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                raw_type = match.group(1).lower()
+                employment_type = employment_map.get(raw_type, 'UNKNOWN')
+                confidence = max(confidence, 0.8)
+        
+        # Check remote patterns and normalize
+        for pattern in self.REMOTE_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                raw_status = match.group(1).lower()
+                remote_status = remote_map.get(raw_status, 'UNKNOWN')
+                confidence = max(confidence, 0.8)
+        
+        return employment_type, remote_status, confidence
+
     def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
         """Parse the job detail page HTML and update the job listing with full details.
         
@@ -122,46 +364,84 @@ class GreenhouseSource(BaseSource):
         """
         tree = html.fromstring(html_content)
         
-        # Extract core fields
-        title = tree.xpath('//h1[@class="app-title"]/text()')[0].strip()[:255]  # Match String(255)
-        location = tree.xpath('//div[@class="location"]/text()')[0].strip()[:255]
+        # Extract core fields with fallbacks
+        title, title_confidence = self._extract_with_fallbacks(tree, [
+            '//h1[contains(@class, "app-title")]/text()',
+            '//h1[contains(@class, "section-header")]/text()',
+            '//meta[@property="og:title"]/@content',
+            '//title/text()'
+        ])
         
-        # Get main content
-        content_div = tree.xpath('//div[@id="content"]')[0]
+        location, location_confidence = self._extract_with_fallbacks(tree, [
+            '//div[contains(@class, "location")]/text()',
+            '//meta[@property="og:description"]/@content',
+            '//div[contains(@class, "job__location")]//text()',
+            '//p[contains(text(), "Location:")]/text()'
+        ])
         
-        # Try to extract department from content structure
-        department = None
-        department_elements = content_div.xpath('.//strong[contains(text(), "Department")]')
-        if department_elements:
-            department = department_elements[0].getnext().text.strip()[:255]
-        
-        # Extract clean text content from sections
+        # Extract structured content sections
         description_text = []
+        content_div = tree.xpath('//div[contains(@class, "job__description")]')
+        if content_div:
+            # Get the main description
+            description_section, description_items, desc_confidence = self._extract_section_content(
+                tree, self.DESCRIPTION_HEADERS
+            )
+            if description_section:
+                description_text.append(description_section)
+            else:
+                # Fallback to first few paragraphs
+                intro_paragraphs = content_div[0].xpath('.//p[position() <= 3]')
+                description_text.extend(p.text_content().strip() for p in intro_paragraphs)
         
-        # Get all text nodes while preserving structure
-        for element in content_div.xpath('.//text()'):
-            text = element.strip()
-            if text and not text.startswith('Apply'):  # Skip application buttons
-                description_text.append(text)
+        # Extract requirements section
+        requirements_text, requirements_items, req_confidence = self._extract_section_content(
+            tree, self.REQUIREMENTS_HEADERS
+        )
         
-        # Get source_job_id from input
+        # Extract benefits section
+        benefits_text, benefits_items, benefits_confidence = self._extract_section_content(
+            tree, self.BENEFITS_HEADERS
+        )
+        
+        # Extract salary information
+        salary_info, salary_confidence = self._extract_salary_range(tree)
+        
+        # Try to extract employment type and remote status from all text
+        all_text = ' '.join([
+            title, location, description_text[0] if description_text else '',
+            requirements_text, benefits_text
+        ])
+        employment_type, remote_status, employment_confidence = self._extract_employment_info(all_text)
+        
+        # Get source_job_id and ensure proper type
         source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
-        source_job_id = str(source_job_id)[:255]  # Ensure string and length
+        source_job_id = str(source_job_id)[:255]
         
         # Get existing raw data while preserving non-HTML fields
         existing_raw_data = job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {})
-        raw_data = {
-            k: v for k, v in existing_raw_data.items() 
-            if k not in ('html', 'detail_html')  # Exclude HTML fields
-        }
+        raw_data = {k: v for k, v in existing_raw_data.items() if k not in ('html', 'detail_html')}
         
-        # Add any additional structured data to raw_data
+        # Update raw_data with structured information
         raw_data.update({
             'departments': raw_data.get('departments', []),
             'office_ids': raw_data.get('office_ids', []),
+            'requirements': requirements_items,
+            'benefits': benefits_items,
+            'salary_range': salary_info,
+            'employment_type': employment_type,
+            'remote_status': remote_status,
             'metadata': {
                 'scraped_at': datetime.utcnow().isoformat(),
-                'source': 'greenhouse'
+                'source': 'greenhouse',
+                'confidence_scores': {
+                    'title': title_confidence,
+                    'location': location_confidence,
+                    'requirements': req_confidence,
+                    'benefits': benefits_confidence,
+                    'salary': salary_confidence,
+                    'employment': employment_confidence
+                }
             }
         })
         
@@ -172,10 +452,10 @@ class GreenhouseSource(BaseSource):
         return {
             # Required fields
             'source_job_id': source_job_id,
-            'title': title,
-            'location': location,
-            'department': department,
-            'description': '\n'.join(description_text),
+            'title': title[:255],
+            'location': location[:255],
+            'department': None,  # Will be set by DAG
+            'description': '\n'.join(description_text) if description_text else requirements_text,
             'raw_data': raw_data,
             
             # Default fields
@@ -184,8 +464,6 @@ class GreenhouseSource(BaseSource):
             'last_seen': now,
             'created_at': now,
             'updated_at': now
-            
-            # Note: company_id and company_source_id will be added by the DAG
         }
     
     def prepare_scraping_config(self, url: str) -> dict:

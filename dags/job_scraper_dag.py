@@ -21,7 +21,7 @@ from airflow.decorators import dag, task
 from airflow.models.baseoperator import chain, cross_downstream
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from config.settings import SCRAPING_BEE_API_KEY
-from infrastructure.models import SourceType
+from infrastructure.models import SourceType, EmploymentType, RemoteStatus
 from sources.greenhouse import GreenhouseSource
 
 print("Basic imports successful")
@@ -233,15 +233,23 @@ def job_scraper_dag():
                     
                     # Parse job details and merge with listing data
                     job_details = source_handler.parse_job_details(response.text, listing)
-                    # Ensure job_details is a dictionary
-                    if not isinstance(job_details, dict):
-                        job_details = {
-                            'description': job_details.description if hasattr(job_details, 'description') else None,
-                            'requirements': job_details.requirements if hasattr(job_details, 'requirements') else None,
-                            'benefits': job_details.benefits if hasattr(job_details, 'benefits') else None,
-                            'additional_fields': job_details.additional_fields if hasattr(job_details, 'additional_fields') else {}
+                    detailed_job = {
+                        **listing,
+                        'description': job_details['description'],
+                        'salary_min': job_details['raw_data'].get('salary_range', {}).get('min'),
+                        'salary_max': job_details['raw_data'].get('salary_range', {}).get('max'),
+                        'salary_currency': job_details['raw_data'].get('salary_range', {}).get('currency'),
+                        'employment_type': job_details['raw_data'].get('employment_type', 'UNKNOWN'),
+                        'remote_status': job_details['raw_data'].get('remote_status', 'UNKNOWN'),
+                        'requirements': job_details['raw_data'].get('requirements', []),
+                        'benefits': job_details['raw_data'].get('benefits', []),
+                        'raw_data': job_details['raw_data'],
+                        'metadata': {
+                            'confidence_scores': job_details['raw_data']['metadata']['confidence_scores'],
+                            'parser_version': '1.0',
+                            'last_parsed': datetime.utcnow().isoformat()
                         }
-                    detailed_job = {**listing, **job_details}
+                    }
                     detailed_jobs.append(detailed_job)
                     
             except Exception as e:
@@ -321,7 +329,14 @@ def job_scraper_dag():
                 'created_at',
                 'updated_at',
                 'company_source_id',
-                'source_job_id'
+                'source_job_id',
+                'salary_min',
+                'salary_max',
+                'salary_currency',
+                'employment_type',
+                'remote_status',
+                'requirements',
+                'benefits'
             ]
             
             # Convert job dictionaries to tuples matching the target_fields order
@@ -329,24 +344,49 @@ def job_scraper_dag():
             for listing in listings:
                 if listing['source_job_id'] in job_changes['new_jobs']:
                     job_tuple = (
-                        source['company_id'],        # company_id
-                        listing['title'],            # title
-                        listing.get('location'),     # location
-                        listing.get('department'),   # department
-                        listing.get('description'),  # description
-                        None,                        # raw_data set to None
-                        True,                        # active
-                        now,                         # first_seen
-                        now,                         # last_seen
-                        now,                         # created_at
-                        now,                         # updated_at
-                        source['id'],                # company_source_id
-                        listing['source_job_id']     # source_job_id
+                        source['company_id'],
+                        listing['title'],
+                        listing.get('location'),
+                        listing.get('department'),
+                        listing.get('description'),
+                        listing.get('raw_data'),
+                        True,
+                        now,
+                        now,
+                        now,
+                        now,
+                        source['id'],
+                        listing['source_job_id'],
+                        listing.get('salary_min'),
+                        listing.get('salary_max'),
+                        listing.get('salary_currency'),
+                        listing.get('employment_type'),
+                        listing.get('remote_status'),
+                        listing.get('requirements'),
+                        listing.get('benefits')
                     )
                     new_jobs.append(job_tuple)
             
             if new_jobs:  # Only attempt insert if we have jobs to insert
                 pg_hook.insert_rows('jobs', new_jobs, target_fields=target_fields)
+
+                # After job insertion, insert metadata
+                if listing.get('metadata'):
+                    metadata_fields = [
+                        'job_id',
+                        'confidence_scores',
+                        'parser_version',
+                        'last_parsed',
+                        'parse_count'
+                    ]
+                    metadata_tuple = (
+                        job_tuple[6],  # job_id is the 7th element in the tuple
+                        listing['metadata']['confidence_scores'],
+                        listing['metadata']['parser_version'],
+                        listing['metadata']['last_parsed'],
+                        1
+                    )
+                    pg_hook.insert_rows('job_metadata', [metadata_tuple], target_fields=metadata_fields)
 
     @task
     def update_scrape_time(source: Dict) -> None:
