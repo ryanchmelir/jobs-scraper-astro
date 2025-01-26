@@ -328,30 +328,23 @@ def job_scraper_dag():
                     detailed_job = {
                         **listing,
                         'description': job_details.get('description', ''),
+                        'url': job_details.get('url', listing.get('url', '')),  # Get URL from job_details or listing
                         'salary_min': salary_min,
                         'salary_max': salary_max,
                         'salary_currency': salary_currency,
                         'employment_type': employment_type,
                         'remote_status': remote_status,
-                        'requirements': [],  # No longer parsing separately
-                        'benefits': [],      # No longer parsing separately
                         'raw_data': {
-                            # Only source-specific data that doesn't fit in structured columns
                             'departments': raw_data.get('departments', []),
                             'office_ids': raw_data.get('office_ids', []),
                             'source': 'greenhouse',
                             'scraped_at': datetime.utcnow().isoformat()
-                        },
-                        'metadata': {
-                            'parser_version': '2.0',
-                            'last_parsed': datetime.utcnow().isoformat()
                         }
                     }
                     detailed_jobs.append(detailed_job)
                     
             except Exception as e:
                 logging.error(f"Error scraping job details for {listing['id']}: {str(e)}", exc_info=True)
-                # Continue with other jobs even if one fails
                 continue
                 
         logging.info(f"Scraped details for {len(detailed_jobs)} new jobs")
@@ -359,7 +352,7 @@ def job_scraper_dag():
 
     @task
     def update_database(source_changes_and_jobs) -> None:
-        """Updates the database with job changes and their metadata."""
+        """Updates the database with job changes."""
         source, job_changes, new_jobs = source_changes_and_jobs
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
@@ -414,6 +407,7 @@ def job_scraper_dag():
                 'location',
                 'department',
                 'description',
+                'url',           # Added URL field
                 'raw_data',
                 'active',
                 'first_seen',
@@ -426,23 +420,14 @@ def job_scraper_dag():
                 'salary_max',
                 'salary_currency',
                 'employment_type',
-                'remote_status',
-                'requirements',
-                'benefits'
+                'remote_status'
             ]
             
             # Convert job dictionaries to tuples matching the target_fields order
             job_tuples = []
-            metadata_tuples = []  # For job_metadata table
-            
-            # Pre-create empty JSON arrays for requirements and benefits
-            empty_array_json = json.dumps([])
             
             for job in new_jobs:
                 if job['source_job_id'] in job_changes['new_jobs']:
-                    # Extract metadata
-                    metadata = job.get('metadata', {})
-                    
                     # Convert raw_data to JSON
                     raw_data_json = json.dumps(job.get('raw_data', {}))
                     
@@ -452,6 +437,7 @@ def job_scraper_dag():
                         job.get('location', ''),                 # location
                         job.get('department'),                   # department
                         job.get('description', ''),              # description
+                        job.get('url', ''),                      # url
                         raw_data_json,                           # raw_data
                         True,                                    # active
                         now,                                     # first_seen
@@ -464,19 +450,9 @@ def job_scraper_dag():
                         job.get('salary_max'),                  # salary_max
                         job.get('salary_currency'),             # salary_currency
                         job.get('employment_type'),             # employment_type (already normalized)
-                        job.get('remote_status'),               # remote_status (already normalized)
-                        empty_array_json,                       # requirements (always empty)
-                        empty_array_json                        # benefits (always empty)
+                        job.get('remote_status')                # remote_status (already normalized)
                     )
                     job_tuples.append(job_tuple)
-                    
-                    # Store metadata tuple for later insertion
-                    metadata_tuples.append({
-                        'source_job_id': job['source_job_id'],
-                        'parser_version': metadata.get('parser_version', '2.0'),
-                        'last_parsed': metadata.get('last_parsed', now.isoformat()),
-                        'parse_count': 1  # First parse
-                    })
             
             if job_tuples:  # Only attempt insert if we have jobs to insert
                 # Create the INSERT statement with ON CONFLICT DO UPDATE
@@ -496,53 +472,18 @@ def job_scraper_dag():
                                 VALUES {values_template}
                                 ON CONFLICT (company_source_id, source_job_id) 
                                 DO UPDATE SET {update_str}
-                                RETURNING id, source_job_id;
                             """
                             
                             # Flatten job_tuples into a single list of parameters
                             params = [item for job_tuple in job_tuples for item in job_tuple]
                             
-                            # Execute single query and get results
+                            # Execute single query
                             cur.execute(sql, params)
-                            job_ids = cur.fetchall()
-                            
-                            # Create a mapping of source_job_id to job_id
-                            job_id_map = {row[1]: row[0] for row in job_ids}
-                            
-                            # Insert metadata with job_ids
-                            if metadata_tuples:
-                                metadata_values_template = ','.join(['(%s, %s, %s, %s)' for _ in metadata_tuples])
-                                metadata_sql = f"""
-                                    INSERT INTO job_metadata 
-                                    (job_id, parser_version, last_parsed, parse_count)
-                                    VALUES {metadata_values_template}
-                                    ON CONFLICT (job_id) 
-                                    DO UPDATE SET
-                                        parser_version = EXCLUDED.parser_version,
-                                        last_parsed = EXCLUDED.last_parsed,
-                                        parse_count = job_metadata.parse_count + 1
-                                """
-                                
-                                # Create metadata tuples with job_ids
-                                metadata_params = []
-                                for m in metadata_tuples:
-                                    if m['source_job_id'] in job_id_map:
-                                        metadata_params.extend([
-                                            job_id_map[m['source_job_id']],
-                                            m['parser_version'],
-                                            m['last_parsed'],
-                                            m['parse_count']
-                                        ])
-                                
-                                # Insert metadata
-                                if metadata_params:
-                                    cur.execute(metadata_sql, metadata_params)
-                            
                             conn.commit()
-                            logging.info(f"Inserted/updated {len(job_tuples)} jobs and their metadata for source {source['id']}")
+                            logging.info(f"Inserted/updated {len(job_tuples)} jobs for source {source['id']}")
                         except Exception as e:
                             conn.rollback()
-                            logging.error(f"Error inserting jobs and metadata: {str(e)}")
+                            logging.error(f"Error inserting jobs: {str(e)}")
                             raise
 
     @task

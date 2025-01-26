@@ -63,24 +63,6 @@ class Company(Base):
     def __repr__(self):
         return f"<Company(name='{self.name}')>"
 
-class JobMetadata(Base):
-    """Stores metadata about job parsing and confidence scores"""
-    __tablename__ = 'job_metadata'
-    
-    id = Column(Integer, primary_key=True)
-    job_id = Column(Integer, ForeignKey('jobs.id'), unique=True)
-    
-    # Confidence scores
-    confidence_scores = Column(JSON)
-    
-    # Parsing metadata
-    parser_version = Column(String(50))
-    last_parsed = Column(DateTime)
-    parse_count = Column(Integer, default=1)
-    
-    # Relationship
-    job = relationship("Job", back_populates="parsing_metadata")
-
 class Job(Base):
     """
     Represents a job listing in the database.
@@ -97,6 +79,7 @@ class Job(Base):
     location = Column(String(255))
     department = Column(String(255))
     description = Column(Text)
+    url = Column(String(1024))  # Job posting URL
     raw_data = Column(JSON)
     active = Column(Boolean, default=True)
     
@@ -119,14 +102,9 @@ class Job(Base):
     employment_type = Column(SQLEnum(EmploymentType), default=EmploymentType.UNKNOWN)
     remote_status = Column(SQLEnum(RemoteStatus), default=RemoteStatus.UNKNOWN)
     
-    # Structured content
-    requirements = Column(JSON)  # List of requirement items
-    benefits = Column(JSON)  # List of benefit items
-    
     # Relationships
     company = relationship('Company', back_populates='jobs')
     company_source = relationship('CompanySource', back_populates='jobs')
-    parsing_metadata = relationship("JobMetadata", back_populates="job", uselist=False)
 
     __table_args__ = (
         sa.UniqueConstraint('company_source_id', 'source_job_id', name='unique_job_per_source'),

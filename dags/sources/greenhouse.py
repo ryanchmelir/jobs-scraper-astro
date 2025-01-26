@@ -246,6 +246,7 @@ class GreenhouseSource(BaseSource):
                 'location': location,
                 'department': None,  # Will be set by DAG
                 'description': description_text,
+                'url': self.get_listing_url(job_listing),  # Add URL as main field
                 'raw_data': raw_data,
                 'active': True,
                 'first_seen': now,
@@ -262,6 +263,7 @@ class GreenhouseSource(BaseSource):
                 'location': '',
                 'department': None,
                 'description': '',
+                'url': '',
                 'raw_data': {'error': str(e)},
                 'active': False
             }
