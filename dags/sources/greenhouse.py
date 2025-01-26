@@ -8,6 +8,8 @@ import re
 from datetime import datetime
 import logging
 import html2text
+import time
+from threading import Lock
 
 from .base import BaseSource, JobListing
 
@@ -16,8 +18,36 @@ try:
 except ImportError:
     SCRAPING_BEE_API_KEY = None  # Will be mocked in tests
 
+class RateLimiter:
+    """Simple rate limiter for API calls."""
+    def __init__(self, calls: int, period: float):
+        self.calls = calls  # Number of calls allowed
+        self.period = period  # Time period in seconds
+        self.timestamps = []  # Timestamp of each call
+        self.lock = Lock()  # Thread safety
+
+    def acquire(self):
+        """Wait if necessary and record the timestamp."""
+        with self.lock:
+            now = time.time()
+            # Remove timestamps older than our period
+            self.timestamps = [ts for ts in self.timestamps if ts > now - self.period]
+            
+            # If we've hit our limit, wait
+            if len(self.timestamps) >= self.calls:
+                sleep_time = self.timestamps[0] - (now - self.period)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                self.timestamps = self.timestamps[1:]
+            
+            # Record this call
+            self.timestamps.append(now)
+
 class GreenhouseSource(BaseSource):
     """Implementation of BaseSource for Greenhouse job boards."""
+    
+    # Class-level rate limiter: 10 requests per minute
+    _rate_limiter = RateLimiter(calls=10, period=60.0)
     
     def __init__(self):
         super().__init__()
@@ -66,6 +96,20 @@ class GreenhouseSource(BaseSource):
         """Get the URL for a company's Greenhouse job board."""
         return f"https://boards.greenhouse.io/{company_source_id}"
     
+    def _make_request(self, url: str) -> str:
+        """Make a rate-limited request to ScrapingBee."""
+        import httpx
+        
+        # Acquire rate limit token
+        self._rate_limiter.acquire()
+        
+        # Make the request
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get('https://app.scrapingbee.com/api/v1/',
+                              params=self.prepare_scraping_config(url))
+            response.raise_for_status()
+            return response.text
+
     def parse_listings_page(self, html_content: str) -> List[JobListing]:
         """Parse the Greenhouse job board HTML into JobListing objects."""
         listings = []

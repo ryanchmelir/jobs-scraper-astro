@@ -360,113 +360,111 @@ def job_scraper_dag():
         # Define stale threshold - jobs not seen for this long will be marked inactive
         STALE_THRESHOLD = timedelta(days=7)
         
-        # Mark jobs as inactive if they haven't been seen recently and aren't in current scrape
-        sql = """
-            UPDATE jobs 
-            SET active = false, 
-                updated_at = %(now)s
-            WHERE company_source_id = %(source_id)s
-            AND active = true
-            AND source_job_id != ALL(%(current_job_ids)s)
-            AND (%(now)s - last_seen) > %(stale_threshold)s
-        """
-        
-        current_job_ids = [job['source_job_id'] for job in new_jobs]
-        
-        result = pg_hook.run(sql, parameters={
-            'source_id': source['id'],
-            'current_job_ids': current_job_ids,
-            'now': now,
-            'stale_threshold': STALE_THRESHOLD
-        })
-        
-        if result:
-            logging.info(f"Marked jobs as inactive for source {source['id']} that haven't been seen for {STALE_THRESHOLD.days} days")
-        
-        # Update last_seen for jobs that still exist
-        if current_job_ids:
-            sql = """
-                UPDATE jobs 
-                SET last_seen = %(now)s,
-                    updated_at = %(now)s
-                WHERE company_source_id = %(source_id)s
-                AND source_job_id = ANY(%(job_ids)s)
-            """
-            pg_hook.run(sql, parameters={
-                'source_id': source['id'],
-                'job_ids': current_job_ids,
-                'now': now
-            })
-        
-        # Insert new jobs
-        if job_changes['new_jobs']:
-            # Define target fields in exact database column order
-            target_fields = [
-                'company_id',
-                'title',
-                'location',
-                'department',
-                'description',
-                'url',           # Added URL field
-                'raw_data',
-                'active',
-                'first_seen',
-                'last_seen',
-                'created_at',
-                'updated_at',
-                'company_source_id',
-                'source_job_id',
-                'salary_min',
-                'salary_max',
-                'salary_currency',
-                'employment_type',
-                'remote_status'
-            ]
-            
-            # Convert job dictionaries to tuples matching the target_fields order
-            job_tuples = []
-            
-            for job in new_jobs:
-                if job['source_job_id'] in job_changes['new_jobs']:
-                    # Convert raw_data to JSON
-                    raw_data_json = json.dumps(job.get('raw_data', {}))
+        # Start a transaction and acquire locks
+        with pg_hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                try:
+                    # Lock the company_source row to prevent concurrent updates to the same source
+                    cur.execute("""
+                        SELECT id 
+                        FROM company_sources 
+                        WHERE id = %(source_id)s 
+                        FOR UPDATE
+                    """, {'source_id': source['id']})
                     
-                    job_tuple = (
-                        source['company_id'],                    # company_id
-                        job.get('title', ''),                    # title
-                        job.get('location', ''),                 # location
-                        job.get('department'),                   # department
-                        job.get('description', ''),              # description
-                        job.get('url', ''),                      # url
-                        raw_data_json,                           # raw_data
-                        True,                                    # active
-                        now,                                     # first_seen
-                        now,                                     # last_seen
-                        now,                                     # created_at
-                        now,                                     # updated_at
-                        source['id'],                           # company_source_id
-                        job['source_job_id'],                   # source_job_id
-                        job.get('salary_min'),                  # salary_min
-                        job.get('salary_max'),                  # salary_max
-                        job.get('salary_currency'),             # salary_currency
-                        job.get('employment_type'),             # employment_type (already normalized)
-                        job.get('remote_status')                # remote_status (already normalized)
-                    )
-                    job_tuples.append(job_tuple)
-            
-            if job_tuples:  # Only attempt insert if we have jobs to insert
-                # Create the INSERT statement with ON CONFLICT DO UPDATE
-                fields_str = ', '.join(target_fields)
-                update_fields = [f for f in target_fields if f not in ('company_source_id', 'source_job_id')]
-                update_str = ', '.join([f"{f} = EXCLUDED.{f}" for f in update_fields])
-                
-                # Execute with raw SQL to handle JSON fields properly
-                with pg_hook.get_conn() as conn:
-                    with conn.cursor() as cur:
-                        try:
-                            # Build a single query for all jobs
-                            placeholders_per_row = ', '.join(['%s'] * len(target_fields))
-                            values_template = ','.join([f'({placeholders_per_row})' for _ in range(len(job_tuples))])
+                    # Mark jobs as inactive if they haven't been seen recently
+                    cur.execute("""
+                        UPDATE jobs 
+                        SET active = false, 
+                            updated_at = %(now)s
+                        WHERE company_source_id = %(source_id)s
+                        AND active = true
+                        AND source_job_id != ALL(%(current_job_ids)s)
+                        AND (%(now)s - last_seen) > %(stale_threshold)s
+                    """, {
+                        'source_id': source['id'],
+                        'current_job_ids': [job['source_job_id'] for job in new_jobs],
+                        'now': now,
+                        'stale_threshold': STALE_THRESHOLD
+                    })
+                    
+                    # Update last_seen for existing jobs
+                    if new_jobs:
+                        cur.execute("""
+                            UPDATE jobs 
+                            SET last_seen = %(now)s,
+                                updated_at = %(now)s
+                            WHERE company_source_id = %(source_id)s
+                            AND source_job_id = ANY(%(job_ids)s)
+                        """, {
+                            'source_id': source['id'],
+                            'job_ids': [job['source_job_id'] for job in new_jobs],
+                            'now': now
+                        })
+                    
+                    # Insert new jobs using ON CONFLICT DO UPDATE
+                    if job_changes['new_jobs']:
+                        # Define target fields in exact database column order
+                        target_fields = [
+                            'company_id',
+                            'title',
+                            'location',
+                            'department',
+                            'description',
+                            'url',
+                            'raw_data',
+                            'active',
+                            'first_seen',
+                            'last_seen',
+                            'created_at',
+                            'updated_at',
+                            'company_source_id',
+                            'source_job_id',
+                            'salary_min',
+                            'salary_max',
+                            'salary_currency',
+                            'employment_type',
+                            'remote_status'
+                        ]
+                        
+                        # Convert job dictionaries to tuples
+                        job_tuples = []
+                        for job in new_jobs:
+                            if job['source_job_id'] in job_changes['new_jobs']:
+                                job_tuple = (
+                                    source['company_id'],
+                                    job.get('title', ''),
+                                    job.get('location', ''),
+                                    job.get('department'),
+                                    job.get('description', ''),
+                                    job.get('url', ''),
+                                    json.dumps(job.get('raw_data', {})),
+                                    True,
+                                    now,
+                                    now,
+                                    now,
+                                    now,
+                                    source['id'],
+                                    job['source_job_id'],
+                                    job.get('salary_min'),
+                                    job.get('salary_max'),
+                                    job.get('salary_currency'),
+                                    job.get('employment_type'),
+                                    job.get('remote_status')
+                                )
+                                job_tuples.append(job_tuple)
+                        
+                        if job_tuples:
+                            # Create the INSERT statement with ON CONFLICT DO UPDATE
+                            fields_str = ', '.join(target_fields)
+                            update_fields = [f for f in target_fields if f not in ('company_source_id', 'source_job_id')]
+                            update_str = ', '.join([f"{f} = EXCLUDED.{f}" for f in update_fields])
+                            
+                            # Build query for batch insert
+                            placeholders = ', '.join(['%s'] * len(target_fields))
+                            values_template = ','.join([f'({placeholders})' for _ in range(len(job_tuples))])
+                            
+                            # Execute batch insert with ON CONFLICT handling
                             sql = f"""
                                 INSERT INTO jobs ({fields_str})
                                 VALUES {values_template}
@@ -474,17 +472,18 @@ def job_scraper_dag():
                                 DO UPDATE SET {update_str}
                             """
                             
-                            # Flatten job_tuples into a single list of parameters
+                            # Flatten parameters and execute
                             params = [item for job_tuple in job_tuples for item in job_tuple]
-                            
-                            # Execute single query
                             cur.execute(sql, params)
-                            conn.commit()
-                            logging.info(f"Inserted/updated {len(job_tuples)} jobs for source {source['id']}")
-                        except Exception as e:
-                            conn.rollback()
-                            logging.error(f"Error inserting jobs: {str(e)}")
-                            raise
+                    
+                    # Commit the entire transaction
+                    conn.commit()
+                    logging.info(f"Successfully updated database for source {source['id']}")
+                    
+                except Exception as e:
+                    conn.rollback()
+                    logging.error(f"Error updating database: {str(e)}")
+                    raise
 
     @task
     def update_scrape_time(source: Dict) -> None:
