@@ -230,6 +230,15 @@ def job_discovery_dag():
         if source['source_type'] == SourceType.GREENHOUSE.value and listings:
             source_handler = GreenhouseSource()
             
+            # Skip URL testing if we already know it redirects
+            if source.get('config', {}).get('redirects_externally'):
+                redirects_externally = True
+                # Mark all listings accordingly
+                for listing in listings:
+                    if not listing.get('raw_data'):
+                        listing['raw_data'] = {}
+                    listing['raw_data']['redirects_externally'] = True
+            
             # Test URL patterns with first job regardless of new/existing
             sample_listing = listings[0]  # Take first listing
             
