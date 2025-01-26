@@ -3,7 +3,7 @@ Greenhouse job board source implementation.
 Uses ScrapingBee for fetching pages and lxml for parsing.
 """
 from typing import List, Dict, Optional, Tuple
-from lxml import html
+from lxml import html, etree
 import random
 import re
 from datetime import datetime
@@ -211,14 +211,13 @@ class GreenhouseSource(BaseSource):
                 try:
                     # Use a simpler, more robust XPath expression
                     # First try exact match (case-insensitive)
-                    xpath = f"//{header_tag}[translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = '{header.lower()}']"
+                    header_text = header.lower().replace("'", "''")
+                    xpath = f"//{header_tag}[translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='{header_text}']"
                     elements = tree.xpath(xpath)
                     
-                    # If no exact match, try contains
+                    # If no exact match, try contains with normalized text
                     if not elements:
-                        # Escape single quotes in header text
-                        header_text = header.lower().replace("'", "''")
-                        xpath = f"//{header_tag}[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header_text}')]"
+                        xpath = f"//{header_tag}[contains(normalize-space(), '{header_text}')]"
                         elements = tree.xpath(xpath)
                     
                     for element in elements:
@@ -259,8 +258,11 @@ class GreenhouseSource(BaseSource):
                                 max_confidence = confidence
                                 best_content = '\n'.join(content)
                 
-                except lxml.etree.XPathEvalError as e:
-                    logging.warning(f"XPath error for header '{header}': {str(e)}")
+                except etree.XPathEvalError as e:
+                    logging.warning(f"XPath error for header '{header}' with tag '{header_tag}': {str(e)}")
+                    continue
+                except Exception as e:
+                    logging.warning(f"Unexpected error for header '{header}' with tag '{header_tag}': {str(e)}")
                     continue
         
         return best_content, structured_items, max_confidence
