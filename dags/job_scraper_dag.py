@@ -13,10 +13,11 @@ Scheduling Information:
 - Retries failed tasks up to 3 times with 5-minute delays
 """
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 import httpx
 import logging
 import json
+import re
 
 from airflow.decorators import dag, task
 from airflow.models.baseoperator import chain, cross_downstream
@@ -38,6 +39,80 @@ default_args = {
     'email_on_retry': False,
     'depends_on_past': False,  # Prevent failed runs from blocking next runs
 }
+
+def parse_salary_string(salary_str: Optional[str]) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    """Parse a salary string into min, max, and currency."""
+    if not salary_str:
+        return None, None, None
+        
+    # Remove any whitespace and convert to lowercase
+    salary_str = salary_str.lower().strip()
+    
+    # Try to identify currency
+    currency = 'USD'  # Default
+    if '€' in salary_str:
+        currency = 'EUR'
+    elif '£' in salary_str:
+        currency = 'GBP'
+    
+    # Extract numbers
+    numbers = re.findall(r'(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)', salary_str)
+    if not numbers:
+        return None, None, None
+        
+    # Convert numbers to integers
+    clean_numbers = []
+    for num in numbers:
+        # Remove commas and handle 'k' multiplier
+        num = num.replace(',', '')
+        if 'k' in salary_str:
+            num = float(num) * 1000
+        clean_numbers.append(int(float(num)))
+    
+    if len(clean_numbers) == 1:
+        return clean_numbers[0], clean_numbers[0], currency
+    elif len(clean_numbers) >= 2:
+        return min(clean_numbers), max(clean_numbers), currency
+    
+    return None, None, currency
+
+def normalize_employment_type(raw_type: Optional[str]) -> str:
+    """Convert raw employment type string to enum value."""
+    if not raw_type:
+        return EmploymentType.UNKNOWN.name
+        
+    raw_type = raw_type.lower()
+    
+    if 'full' in raw_type and 'time' in raw_type:
+        return EmploymentType.FULL_TIME.name
+    elif 'part' in raw_type and 'time' in raw_type:
+        return EmploymentType.PART_TIME.name
+    elif 'contract' in raw_type:
+        return EmploymentType.CONTRACT.name
+    elif 'intern' in raw_type:
+        return EmploymentType.INTERNSHIP.name
+    elif 'temp' in raw_type:
+        return EmploymentType.TEMPORARY.name
+        
+    return EmploymentType.UNKNOWN.name
+
+def normalize_remote_status(raw_status: Optional[str]) -> str:
+    """Convert raw remote status string to enum value."""
+    if not raw_status:
+        return RemoteStatus.UNKNOWN.name
+        
+    raw_status = raw_status.lower()
+    
+    if 'remote' in raw_status:
+        if 'hybrid' in raw_status:
+            return RemoteStatus.HYBRID.name
+        return RemoteStatus.REMOTE.name
+    elif 'hybrid' in raw_status:
+        return RemoteStatus.HYBRID.name
+    elif 'office' in raw_status or 'on-site' in raw_status or 'onsite' in raw_status:
+        return RemoteStatus.OFFICE.name
+        
+    return RemoteStatus.UNKNOWN.name
 
 @dag(
     dag_id='job_scraper',
@@ -242,27 +317,24 @@ def job_scraper_dag():
                     if not isinstance(raw_data, dict):
                         raw_data = {}
                     
-                    # Get metadata with validation
-                    metadata = raw_data.get('metadata', {})
-                    if not isinstance(metadata, dict):
-                        metadata = {}
+                    # Parse salary string into structured data
+                    salary_min, salary_max, salary_currency = parse_salary_string(raw_data.get('salary'))
                     
-                    # Get salary range with validation
-                    salary_range = raw_data.get('salary_range', {})
-                    if not isinstance(salary_range, dict):
-                        salary_range = {}
+                    # Normalize employment type and remote status
+                    employment_type = normalize_employment_type(raw_data.get('employment_type'))
+                    remote_status = normalize_remote_status(raw_data.get('remote_status'))
                     
                     # Prepare job record with safe gets
                     detailed_job = {
                         **listing,
                         'description': job_details.get('description', ''),
-                        'salary_min': salary_range.get('min'),
-                        'salary_max': salary_range.get('max'),
-                        'salary_currency': salary_range.get('currency'),
-                        'employment_type': raw_data.get('employment_type', 'UNKNOWN'),
-                        'remote_status': raw_data.get('remote_status', 'UNKNOWN'),
-                        'requirements': raw_data.get('requirements', []),
-                        'benefits': raw_data.get('benefits', []),
+                        'salary_min': salary_min,
+                        'salary_max': salary_max,
+                        'salary_currency': salary_currency,
+                        'employment_type': employment_type,
+                        'remote_status': remote_status,
+                        'requirements': [],  # No longer parsing separately
+                        'benefits': [],      # No longer parsing separately
                         'raw_data': {
                             # Only source-specific data that doesn't fit in structured columns
                             'departments': raw_data.get('departments', []),
@@ -271,8 +343,7 @@ def job_scraper_dag():
                             'scraped_at': datetime.utcnow().isoformat()
                         },
                         'metadata': {
-                            'confidence_scores': metadata.get('confidence_scores', {}),
-                            'parser_version': '1.0',
+                            'parser_version': '2.0',
                             'last_parsed': datetime.utcnow().isoformat()
                         }
                     }
@@ -288,28 +359,23 @@ def job_scraper_dag():
 
     @task
     def update_database(source_changes_and_jobs) -> None:
-        """
-        Updates the database with job changes and their metadata.
-        
-        Args:
-            source_changes_and_jobs: Tuple of (source, job_changes, new_jobs) from upstream tasks.
-        """
+        """Updates the database with job changes and their metadata."""
         source, job_changes, new_jobs = source_changes_and_jobs
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
         # Define stale threshold - jobs not seen for this long will be marked inactive
-        STALE_THRESHOLD = timedelta(days=7)  # Configurable, adjust as needed
+        STALE_THRESHOLD = timedelta(days=7)
         
         # Mark jobs as inactive if they haven't been seen recently and aren't in current scrape
         sql = """
             UPDATE jobs 
             SET active = false, 
-                updated_at = %(now)s  -- Only update the status change timestamp
+                updated_at = %(now)s
             WHERE company_source_id = %(source_id)s
-            AND active = true  -- Only update currently active jobs
-            AND source_job_id != ALL(%(current_job_ids)s)  -- Not in current scrape
-            AND (%(now)s - last_seen) > %(stale_threshold)s  -- Haven't been seen recently
+            AND active = true
+            AND source_job_id != ALL(%(current_job_ids)s)
+            AND (%(now)s - last_seen) > %(stale_threshold)s
         """
         
         current_job_ids = [job['source_job_id'] for job in new_jobs]
@@ -369,28 +435,16 @@ def job_scraper_dag():
             job_tuples = []
             metadata_tuples = []  # For job_metadata table
             
+            # Pre-create empty JSON arrays for requirements and benefits
+            empty_array_json = json.dumps([])
+            
             for job in new_jobs:
                 if job['source_job_id'] in job_changes['new_jobs']:
-                    # Extract metadata for separate table
+                    # Extract metadata
                     metadata = job.get('metadata', {})
                     
-                    # Clean raw_data by removing metadata
-                    raw_data = job.get('raw_data', {}).copy()
-                    raw_data.pop('metadata', None)  # Remove metadata if exists
-                    
-                    # Convert to JSON strings
-                    raw_data_json = json.dumps(raw_data)
-                    requirements_json = json.dumps(job.get('requirements', []))
-                    benefits_json = json.dumps(job.get('benefits', []))
-                    
-                    # Ensure enum values are properly set
-                    employment_type = job.get('employment_type')
-                    if employment_type is None or employment_type not in EmploymentType.__members__:
-                        employment_type = EmploymentType.UNKNOWN.name
-                    
-                    remote_status = job.get('remote_status')
-                    if remote_status is None or remote_status not in RemoteStatus.__members__:
-                        remote_status = RemoteStatus.UNKNOWN.name
+                    # Convert raw_data to JSON
+                    raw_data_json = json.dumps(job.get('raw_data', {}))
                     
                     job_tuple = (
                         source['company_id'],                    # company_id
@@ -398,7 +452,7 @@ def job_scraper_dag():
                         job.get('location', ''),                 # location
                         job.get('department'),                   # department
                         job.get('description', ''),              # description
-                        raw_data_json,                           # raw_data (without metadata)
+                        raw_data_json,                           # raw_data
                         True,                                    # active
                         now,                                     # first_seen
                         now,                                     # last_seen
@@ -409,18 +463,17 @@ def job_scraper_dag():
                         job.get('salary_min'),                  # salary_min
                         job.get('salary_max'),                  # salary_max
                         job.get('salary_currency'),             # salary_currency
-                        employment_type,                        # employment_type (enum)
-                        remote_status,                          # remote_status (enum)
-                        requirements_json,                      # requirements
-                        benefits_json                           # benefits
+                        job.get('employment_type'),             # employment_type (already normalized)
+                        job.get('remote_status'),               # remote_status (already normalized)
+                        empty_array_json,                       # requirements (always empty)
+                        empty_array_json                        # benefits (always empty)
                     )
                     job_tuples.append(job_tuple)
                     
                     # Store metadata tuple for later insertion
                     metadata_tuples.append({
                         'source_job_id': job['source_job_id'],
-                        'confidence_scores': json.dumps(metadata.get('confidence_scores', {})),
-                        'parser_version': metadata.get('parser_version', '1.0'),
+                        'parser_version': metadata.get('parser_version', '2.0'),
                         'last_parsed': metadata.get('last_parsed', now.isoformat()),
                         'parse_count': 1  # First parse
                     })
@@ -435,7 +488,7 @@ def job_scraper_dag():
                 with pg_hook.get_conn() as conn:
                     with conn.cursor() as cur:
                         try:
-                            # Build a single query for all jobs using mogrify
+                            # Build a single query for all jobs
                             placeholders_per_row = ', '.join(['%s'] * len(target_fields))
                             values_template = ','.join([f'({placeholders_per_row})' for _ in range(len(job_tuples))])
                             sql = f"""
@@ -458,14 +511,13 @@ def job_scraper_dag():
                             
                             # Insert metadata with job_ids
                             if metadata_tuples:
-                                metadata_values_template = ','.join(['(%s, %s, %s, %s, %s)' for _ in metadata_tuples])
+                                metadata_values_template = ','.join(['(%s, %s, %s, %s)' for _ in metadata_tuples])
                                 metadata_sql = f"""
                                     INSERT INTO job_metadata 
-                                    (job_id, confidence_scores, parser_version, last_parsed, parse_count)
+                                    (job_id, parser_version, last_parsed, parse_count)
                                     VALUES {metadata_values_template}
                                     ON CONFLICT (job_id) 
                                     DO UPDATE SET
-                                        confidence_scores = EXCLUDED.confidence_scores,
                                         parser_version = EXCLUDED.parser_version,
                                         last_parsed = EXCLUDED.last_parsed,
                                         parse_count = job_metadata.parse_count + 1
@@ -477,7 +529,6 @@ def job_scraper_dag():
                                     if m['source_job_id'] in job_id_map:
                                         metadata_params.extend([
                                             job_id_map[m['source_job_id']],
-                                            m['confidence_scores'],
                                             m['parser_version'],
                                             m['last_parsed'],
                                             m['parse_count']
