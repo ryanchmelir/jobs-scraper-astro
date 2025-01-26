@@ -130,7 +130,7 @@ def job_scraper_dag():
     """Creates a DAG for scraping job listings."""
     
     @task
-    def get_company_sources_to_scrape(batch_size: int = 10) -> List[Dict]:
+    def get_company_sources_to_scrape(batch_size: int = 5) -> List[Dict]:
         """
         Selects company sources that are due for scraping and haven't failed too many times.
         
