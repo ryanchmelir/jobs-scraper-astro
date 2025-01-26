@@ -12,6 +12,7 @@ scrapingbee==2.0.1  # Scraping service client
 # HTML Processing
 beautifulsoup4==4.12.2  # For HTML parsing
 lxml==4.9.3  # For XML/HTML processing
+html2text==2020.1.16  # For HTML to Markdown conversion
 
 # Settings and Config
 python-dotenv==1.0.0  # For environment variables
