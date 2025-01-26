@@ -123,33 +123,25 @@ def job_details_dag():
     @task(pool='scraping_bee', pool_slots=1)
     def scrape_job_details(job: Dict) -> Dict:
         """
-        Scrapes detailed information for a single job.
-        Uses Airflow pool to ensure max 5 concurrent requests to ScrapingBee across all DAGs.
-        Properly handles rate limiting and updates job_scraping_issues on failures.
-        
-        Args:
-            job: Job record to scrape details for.
-            
-        Returns:
-            Dictionary with job details and structured data.
-            
-        Raises:
-            AirflowException: On rate limiting (429) to trigger retry
-            ValueError: On unsupported source types
+        Scrapes detailed information for a job.
+        Returns a dict with job_id, success flag, and either details or error info.
+        Failed jobs will be recorded but won't fail the task.
         """
-        if job['source_type'] == SourceType.GREENHOUSE.value:
-            source_handler = GreenhouseSource()
-        else:
-            raise ValueError(f"Unsupported source type: {job['source_type']}")
-        
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         try:
-            # Use existing URL since it was validated during discovery
-            detail_url = job['url']
-            scraping_config = source_handler.prepare_scraping_config(detail_url)
+            if job['source_type'] == SourceType.GREENHOUSE.value:
+                source_handler = GreenhouseSource()
+            else:
+                return {
+                    'job_id': job['job_id'],
+                    'success': False,
+                    'error': f"Unsupported source type: {job['source_type']}"
+                }
             
-            logging.info(f"Scraping details from {detail_url} (chunk {job['chunk_id']})")
+            scraping_config = source_handler.prepare_scraping_config(job['url'])
+            
+            logging.info(f"Scraping job details from {job['url']} (chunk {job['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 
@@ -171,10 +163,35 @@ def job_details_dag():
                         'error': error_msg
                     })
                     
-                    from airflow.exceptions import AirflowException
-                    raise AirflowException(error_msg)
+                    return {
+                        'job_id': job['job_id'],
+                        'success': False,
+                        'error': error_msg
+                    }
                 
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except Exception as e:
+                    error_msg = f"HTTP error {response.status_code}: {str(e)}"
+                    logging.error(f"Error scraping job {job['job_id']}: {error_msg}")
+                    
+                    pg_hook.run("""
+                        INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
+                        VALUES (%(job_id)s, 1, NOW(), %(error)s)
+                        ON CONFLICT (job_id) DO UPDATE SET
+                            failure_count = job_scraping_issues.failure_count + 1,
+                            last_failure = NOW(),
+                            last_error = %(error)s
+                    """, parameters={
+                        'job_id': job['job_id'],
+                        'error': error_msg
+                    })
+                    
+                    return {
+                        'job_id': job['job_id'],
+                        'success': False,
+                        'error': error_msg
+                    }
                 
                 # Parse job details
                 details = source_handler.parse_job_details(response.text, {
@@ -214,38 +231,39 @@ def job_details_dag():
                 
                 return {
                     'job_id': job['job_id'],
-                    'details': details,
-                    'success': True
+                    'success': True,
+                    'details': details
                 }
                 
         except Exception as e:
             error_msg = str(e)
             logging.error(f"Error scraping job {job['job_id']}: {error_msg}")
             
-            # Don't update issues table for rate limiting as it's handled above
-            if not isinstance(e, AirflowException):
-                pg_hook.run("""
-                    INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
-                    VALUES (%(job_id)s, 1, NOW(), %(error)s)
-                    ON CONFLICT (job_id) DO UPDATE SET
-                        failure_count = job_scraping_issues.failure_count + 1,
-                        last_failure = NOW(),
-                        last_error = %(error)s
-                """, parameters={
-                    'job_id': job['job_id'],
-                    'error': error_msg
-                })
+            # Update job_scraping_issues
+            pg_hook.run("""
+                INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
+                VALUES (%(job_id)s, 1, NOW(), %(error)s)
+                ON CONFLICT (job_id) DO UPDATE SET
+                    failure_count = job_scraping_issues.failure_count + 1,
+                    last_failure = NOW(),
+                    last_error = %(error)s
+            """, parameters={
+                'job_id': job['job_id'],
+                'error': error_msg
+            })
             
-            raise  # Re-raise to trigger task failure
+            return {
+                'job_id': job['job_id'],
+                'success': False,
+                'error': error_msg
+            }
 
     @task
     def save_job_details(result: Dict) -> None:
         """
-        Saves scraped job details to the database.
-        Also updates company_sources config with working patterns.
-        
-        Args:
-            result: Result from scraping job details.
+        Saves job details to the database.
+        Handles both successful and failed scrapes, updating job_scraping_issues as needed.
+        Failed jobs will be marked in the issues table but won't prevent other jobs from being saved.
         """
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
@@ -260,11 +278,11 @@ def job_details_dag():
                         # Update job with details
                         cur.execute("""
                             UPDATE jobs
-                            SET title = %(title)s,
-                                location = %(location)s,
-                                department = %(department)s,
+                            SET title = COALESCE(%(title)s, title),
+                                location = COALESCE(%(location)s, location),
+                                department = COALESCE(%(department)s, department),
                                 description = %(description)s,
-                                url = %(url)s,
+                                url = COALESCE(%(url)s, url),
                                 raw_data = %(raw_data)s,
                                 salary_min = %(salary_min)s,
                                 salary_max = %(salary_max)s,
@@ -300,12 +318,12 @@ def job_details_dag():
                                 UPDATE company_sources
                                 SET config = jsonb_set(
                                     CASE 
-                                        WHEN config IS NULL THEN '{}'::jsonb
-                                        WHEN config::text = '' THEN '{}'::jsonb
-                                        ELSE config::jsonb
+                                        WHEN config IS NULL THEN '{}'::json
+                                        WHEN config::text = '' THEN '{}'::json
+                                        ELSE config
                                     END,
                                     '{working_job_detail_pattern}',
-                                    %s::jsonb,
+                                    %s::json,
                                     true
                                 )
                                 WHERE id = %s
@@ -318,23 +336,34 @@ def job_details_dag():
                         """, {'job_id': result['job_id']})
                         
                     else:
-                        # Record scraping failure
+                        # Record scraping failure and mark job as not needing details if too many failures
                         cur.execute("""
-                            INSERT INTO job_scraping_issues (
-                                job_id,
-                                failure_count,
-                                last_failure,
-                                last_error
-                            ) VALUES (
-                                %(job_id)s,
-                                1,
-                                %(now)s,
-                                %(error)s
+                            WITH updated_issues AS (
+                                INSERT INTO job_scraping_issues (
+                                    job_id,
+                                    failure_count,
+                                    last_failure,
+                                    last_error
+                                ) VALUES (
+                                    %(job_id)s,
+                                    1,
+                                    %(now)s,
+                                    %(error)s
+                                )
+                                ON CONFLICT (job_id) DO UPDATE
+                                SET failure_count = job_scraping_issues.failure_count + 1,
+                                    last_failure = EXCLUDED.last_failure,
+                                    last_error = EXCLUDED.last_error
+                                RETURNING failure_count
                             )
-                            ON CONFLICT (job_id) DO UPDATE
-                            SET failure_count = job_scraping_issues.failure_count + 1,
-                                last_failure = EXCLUDED.last_failure,
-                                last_error = EXCLUDED.last_error
+                            UPDATE jobs
+                            SET needs_details = false,
+                                updated_at = %(now)s
+                            WHERE id = %(job_id)s
+                            AND EXISTS (
+                                SELECT 1 FROM updated_issues
+                                WHERE failure_count >= 3
+                            )
                         """, {
                             'job_id': result['job_id'],
                             'now': now,
@@ -346,7 +375,7 @@ def job_details_dag():
                 except Exception as e:
                     conn.rollback()
                     logging.error(f"Error saving job details: {str(e)}")
-                    raise
+                    # Don't raise the exception - let other jobs continue
 
     # Get jobs that need details
     jobs = get_jobs_needing_details()
