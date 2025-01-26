@@ -7,6 +7,7 @@ from lxml import html
 import re
 from datetime import datetime
 import logging
+import html2text
 
 from .base import BaseSource, JobListing
 
@@ -17,6 +18,16 @@ except ImportError:
 
 class GreenhouseSource(BaseSource):
     """Implementation of BaseSource for Greenhouse job boards."""
+    
+    def __init__(self):
+        super().__init__()
+        self.html_converter = html2text.HTML2Text()
+        self.html_converter.ignore_links = False
+        self.html_converter.ignore_images = True
+        self.html_converter.body_width = 0  # Don't wrap text
+        self.html_converter.protect_links = True  # Don't wrap links
+        self.html_converter.unicode_snob = True  # Use Unicode
+        self.html_converter.ul_item_mark = '-'  # Use - for unordered lists
     
     # Employment and remote work patterns
     EMPLOYMENT_PATTERNS = [
@@ -119,6 +130,21 @@ class GreenhouseSource(BaseSource):
             return element.strip()
         return element.text_content().strip()
 
+    def _clean_html_content(self, content_div) -> str:
+        """Clean HTML content and convert to markdown."""
+        if content_div is None:
+            return ""
+            
+        # Remove unwanted elements
+        for elem in content_div.xpath('.//script | .//style | .//form | .//button | .//iframe'):
+            elem.getparent().remove(elem)
+            
+        # Convert div to string while preserving structure
+        html_str = html.tostring(content_div, encoding='unicode')
+        
+        # Convert to markdown
+        return self.html_converter.handle(html_str).strip()
+
     def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
         """Parse job details from HTML content."""
         tree = html.fromstring(html_content)
@@ -154,7 +180,7 @@ class GreenhouseSource(BaseSource):
                 tree.xpath('//div[contains(@class, "description")]')
             )
             
-            description_text = []
+            description_text = ""
             employment_type = None
             remote_status = None
             salary = None
@@ -162,24 +188,16 @@ class GreenhouseSource(BaseSource):
             if content_elems:
                 content_div = content_elems[0]
                 
-                # Get all text nodes while preserving structure
-                for element in content_div.xpath('.//text()'):
-                    text = element.strip()
-                    if text and not text.startswith('Apply'):  # Skip application buttons
-                        description_text.append(text)
+                # Convert content to markdown
+                description_text = self._clean_html_content(content_div)
                 
-                # Join all text for pattern matching
-                full_text = ' '.join(description_text)
-                
-                # Try to extract employment type
-                employment_type = self._extract_with_patterns(full_text, self.EMPLOYMENT_PATTERNS)
-                
-                # Try to extract remote status
-                remote_status = self._extract_with_patterns(full_text, self.REMOTE_PATTERNS)
+                # Extract patterns from the markdown text
+                employment_type = self._extract_with_patterns(description_text, self.EMPLOYMENT_PATTERNS)
+                remote_status = self._extract_with_patterns(description_text, self.REMOTE_PATTERNS)
                 
                 # If location is empty, try to find it in the text
                 if not location:
-                    location = self._extract_with_patterns(full_text, self.LOCATION_PATTERNS)
+                    location = self._extract_with_patterns(description_text, self.LOCATION_PATTERNS)
             
             # Try to find salary information in multiple places
             salary_elems = (
@@ -227,7 +245,7 @@ class GreenhouseSource(BaseSource):
                 'title': title,
                 'location': location,
                 'department': None,  # Will be set by DAG
-                'description': '\n'.join(description_text),
+                'description': description_text,
                 'raw_data': raw_data,
                 'active': True,
                 'first_seen': now,
