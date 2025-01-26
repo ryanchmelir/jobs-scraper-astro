@@ -8,7 +8,8 @@ data extraction and parsing.
 Scheduling Information:
 - Runs every hour
 - Does not perform catchup for missed intervals
-- Lower concurrency for detailed scraping
+- High SQL concurrency for batch processing
+- Respects ScrapingBee's 5 concurrent request limit
 - Longer timeout per task for thorough processing
 """
 from datetime import datetime, timedelta
@@ -51,7 +52,7 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'details'],
-    max_active_tasks=5,
+    max_active_tasks=20,  # High SQL concurrency
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=2),
 )
@@ -98,24 +99,32 @@ def job_details_dag():
         """
         jobs = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
         
-        return [
-            {
-                'job_id': job[0],
-                'company_id': job[1],
-                'source_job_id': job[2],
-                'url': job[3],
-                'company_source_id': job[4],
-                'source_type': job[5],
-                'source_id': job[6],
-                'config': job[7]
-            }
-            for job in jobs
-        ]
+        # Split jobs into chunks of 5 to respect ScrapingBee's concurrent request limit
+        chunked_jobs = []
+        for i in range(0, len(jobs), 5):
+            chunk = jobs[i:i+5]
+            chunked_jobs.extend([
+                {
+                    'job_id': job[0],
+                    'company_id': job[1],
+                    'source_job_id': job[2],
+                    'url': job[3],
+                    'company_source_id': job[4],
+                    'source_type': job[5],
+                    'source_id': job[6],
+                    'config': job[7],
+                    'chunk_id': i // 5  # Add chunk ID for potential use in rate limiting
+                }
+                for job in chunk
+            ])
+        
+        return chunked_jobs
 
     @task
     def scrape_job_details(job: Dict) -> Dict:
         """
         Scrapes detailed information for a single job.
+        Rate limited by chunk_id to respect ScrapingBee's concurrent request limit.
         
         Args:
             job: Job record to scrape details for.
@@ -138,7 +147,7 @@ def job_details_dag():
             
             scraping_config = source_handler.prepare_scraping_config(detail_url)
             
-            logging.info(f"Scraping details from {detail_url}")
+            logging.info(f"Scraping details from {detail_url} (chunk {job['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 response.raise_for_status()

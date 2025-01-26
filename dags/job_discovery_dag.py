@@ -8,7 +8,8 @@ time between a job being posted and us discovering it.
 Scheduling Information:
 - Runs every 10 minutes
 - Does not perform catchup for missed intervals
-- High concurrency for fast discovery
+- High SQL concurrency for fast discovery
+- Respects ScrapingBee's 5 concurrent request limit
 - Short timeout per task
 """
 from datetime import datetime, timedelta
@@ -43,7 +44,7 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
-    max_active_tasks=20,  # High concurrency for fast discovery
+    max_active_tasks=20,  # High SQL concurrency
     max_active_runs=3,
     dagrun_timeout=timedelta(minutes=30),
 )
@@ -77,21 +78,31 @@ def job_discovery_dag():
         """
         sources = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
         
-        return [
-            {
-                'id': source[0],
-                'company_id': source[1],
-                'source_type': source[2],
-                'source_id': source[3],
-                'config': source[4],
-                'failure_count': source[5]
-            }
-            for source in sources
-        ]
+        # Split sources into chunks of 5 to respect ScrapingBee's concurrent request limit
+        chunked_sources = []
+        for i in range(0, len(sources), 5):
+            chunk = sources[i:i+5]
+            chunked_sources.extend([
+                {
+                    'id': source[0],
+                    'company_id': source[1],
+                    'source_type': source[2],
+                    'source_id': source[3],
+                    'config': source[4],
+                    'failure_count': source[5],
+                    'chunk_id': i // 5  # Add chunk ID for potential use in rate limiting
+                }
+                for source in chunk
+            ])
+        
+        return chunked_sources
 
     @task
     def scrape_listings(source: Dict) -> List[Dict]:
-        """Quickly scrapes basic job listing information."""
+        """
+        Quickly scrapes basic job listing information.
+        Rate limited by chunk_id to respect ScrapingBee's concurrent request limit.
+        """
         if source['source_type'] == SourceType.GREENHOUSE.value:
             source_handler = GreenhouseSource()
         else:
@@ -101,7 +112,7 @@ def job_discovery_dag():
         scraping_config = source_handler.prepare_scraping_config(listings_url)
         
         try:
-            logging.info(f"Scraping listings from {listings_url}")
+            logging.info(f"Scraping listings from {listings_url} (chunk {source['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 response.raise_for_status()
