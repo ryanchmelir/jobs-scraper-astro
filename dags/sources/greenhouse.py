@@ -304,10 +304,11 @@ class GreenhouseSource(BaseSource):
         config = config or {}
         
         # Get job_id and company_id
-        url = listing['url'] if isinstance(listing, dict) else listing.url
-        job_id = self._extract_job_id(url)
+        original_url = listing['url'] if isinstance(listing, dict) else listing.url
+        job_id = self._extract_job_id(original_url)
         if not job_id:
-            return url, 'invalid', None
+            logging.error(f"Could not extract job ID from URL: {original_url}")
+            return original_url, 'invalid', None
         
         company_id = None
         if isinstance(listing, dict):
@@ -316,9 +317,10 @@ class GreenhouseSource(BaseSource):
             company_id = getattr(listing, 'raw_data', {}).get('source_id')
         
         if not company_id:
-            company_id = self._extract_company_id(url)
+            company_id = self._extract_company_id(original_url)
         if not company_id:
-            return url, 'invalid', None
+            logging.error(f"Could not extract company ID from URL: {original_url}")
+            return original_url, 'invalid', None
         
         # Check cached pattern first
         if cached_pattern := config.get('working_job_detail_pattern'):
@@ -328,9 +330,13 @@ class GreenhouseSource(BaseSource):
                 if success:
                     return test_url, '200', cached_pattern
                 if redirect:
-                    return url, '302', None
-            except Exception:
-                pass
+                    # If original URL is well-formed, use it
+                    if original_url.startswith(('http://', 'https://')):
+                        return original_url, '302', None
+                    # Otherwise construct a standard Greenhouse URL that will redirect
+                    return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id), '302', None
+            except Exception as e:
+                logging.warning(f"Error with cached pattern: {str(e)}")
         
         # Check for known failed patterns
         failed_patterns = config.get('failed_job_detail_patterns', [])
@@ -346,12 +352,22 @@ class GreenhouseSource(BaseSource):
                 if success:
                     return test_url, '200', pattern
                 if redirect:
-                    return url, '302', None
-            except Exception:
+                    # If original URL is well-formed, use it
+                    if original_url.startswith(('http://', 'https://')):
+                        return original_url, '302', None
+                    # Otherwise construct a standard Greenhouse URL that will redirect
+                    return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id), '302', None
+            except Exception as e:
+                logging.debug(f"Pattern {pattern} failed: {str(e)}")
                 continue
         
         # If we get here, no patterns worked
-        return url, 'invalid', None
+        # If original URL is well-formed, use it
+        if original_url.startswith(('http://', 'https://')):
+            return original_url, 'invalid', None
+        
+        # As a last resort, construct a standard Greenhouse URL
+        return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id), 'invalid', None
 
     def get_listing_url(self, listing: Dict | JobListing) -> str:
         """Get the URL for a job listing."""

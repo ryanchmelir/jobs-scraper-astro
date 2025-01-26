@@ -225,6 +225,7 @@ def job_discovery_dag():
         # For Greenhouse sources, validate URLs efficiently
         url_status = None
         working_pattern = None
+        redirects_externally = False
         
         if source['source_type'] == SourceType.GREENHOUSE.value and listings:
             source_handler = GreenhouseSource()
@@ -253,11 +254,23 @@ def job_discovery_dag():
                         logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
                         
             elif status == '302':
-                # All jobs redirect externally - keep original URLs
+                # All jobs redirect externally - keep original URLs if well-formed
+                redirects_externally = True
                 for listing in listings:
                     if not listing.get('raw_data'):
                         listing['raw_data'] = {}
                     listing['raw_data']['redirects_externally'] = True
+                    # URL will be either the original well-formed URL or a constructed Greenhouse URL
+                    listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
+                    
+            else:  # status == 'invalid'
+                # No working patterns found - try to use well-formed URLs or construct standard ones
+                for listing in listings:
+                    if not listing.get('raw_data'):
+                        listing['raw_data'] = {}
+                    listing['raw_data']['needs_details'] = False
+                    # URL will be either the original well-formed URL or a constructed Greenhouse URL
+                    listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
             
             # Update source config
             if source.get('config') is None:
@@ -265,8 +278,11 @@ def job_discovery_dag():
             
             if working_pattern:
                 source['config']['working_job_detail_pattern'] = working_pattern
-            elif status == '302':
+            elif redirects_externally:
                 source['config']['redirects_externally'] = True
+            else:
+                # No working patterns and no redirects - mark source as having URL issues
+                source['config']['url_issues'] = True
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
                     f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
@@ -276,7 +292,8 @@ def job_discovery_dag():
             'removed_jobs': list(removed_jobs),
             'existing_jobs': list(existing_jobs),
             'url_status': url_status,
-            'working_pattern': working_pattern
+            'working_pattern': working_pattern,
+            'redirects_externally': redirects_externally
         }
 
     @task
@@ -325,10 +342,15 @@ def job_discovery_dag():
                         ]
                         
                         for listing in new_job_listings:
-                            # Don't mark jobs as needing details if they redirect externally
-                            needs_details = not (
-                                job_changes.get('redirects_externally', False) or
-                                listing.get('raw_data', {}).get('redirects_externally', False)
+                            # Only set needs_details = true if:
+                            # 1. We have a working pattern (status = '200')
+                            # 2. No redirects_externally flag
+                            # 3. No explicit needs_details = false in raw_data
+                            needs_details = (
+                                job_changes.get('url_status') == '200' and
+                                not job_changes.get('redirects_externally', False) and
+                                not listing.get('raw_data', {}).get('redirects_externally', False) and
+                                not listing.get('raw_data', {}).get('needs_details') is False
                             )
                             
                             cur.execute("""
