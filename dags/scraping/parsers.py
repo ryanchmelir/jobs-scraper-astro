@@ -125,7 +125,10 @@ def parse_salary_string(salary_str: Optional[str]) -> Tuple[Optional[int], Optio
     return None, None, currency
 
 def extract_structured_salary(text: str) -> Dict:
-    """Extract structured salary information from text."""
+    """
+    Extract structured salary information from text with improved accuracy.
+    Uses a multi-stage approach with pattern prioritization and validation.
+    """
     result = {
         'amount_min': None,
         'amount_max': None,
@@ -136,37 +139,146 @@ def extract_structured_salary(text: str) -> Dict:
     
     if not text:
         return result
-        
-    # Try to find currency
-    for symbol, code in CURRENCY_MAP.items():
-        if symbol in text:
-            result['currency'] = code
-            break
+
+    def parse_amount(amount_str: str) -> Optional[float]:
+        """Parse salary amount handling k suffix, commas, and currency symbols."""
+        try:
+            # Remove currency symbols and commas
+            clean = re.sub(r'[$£€¥]', '', amount_str)
+            clean = clean.replace(',', '')
             
-    # Extract numbers
-    numbers = []
-    for pattern in SALARY_PATTERNS:
+            # Handle k/K suffix
+            multiplier = 1000 if re.search(r'k|K', clean) else 1
+            clean = re.sub(r'k|K', '', clean)
+            
+            # Convert to float and apply multiplier
+            return float(clean) * multiplier
+        except:
+            return None
+
+    def validate_salary(amount: float, context: str = '') -> bool:
+        """
+        Validate if a number looks like a reasonable salary.
+        Also checks surrounding context to avoid employee counts.
+        """
+        # Basic range check for annual salaries
+        if not (20000 <= amount <= 1000000):
+            return False
+            
+        # Check if number appears in employee count context
+        employee_patterns = [
+            r'employees?',
+            r'staff',
+            r'team\s+size',
+            r'company\s+size',
+            r'people'
+        ]
+        context_window = 50  # Characters to check before/after
+        start_idx = max(0, context.find(str(int(amount))) - context_window)
+        end_idx = min(len(context), context.find(str(int(amount))) + context_window)
+        surrounding_text = context[start_idx:end_idx].lower()
+        
+        if any(re.search(pattern, surrounding_text) for pattern in employee_patterns):
+            return False
+            
+        return True
+
+    def find_currency(text: str) -> str:
+        """Identify currency from text."""
+        currency_patterns = {
+            r'(?:USD|US dollars?|American dollars?)': 'USD',
+            r'(?:EUR|euros?)': 'EUR',
+            r'(?:GBP|pounds? sterling|£)': 'GBP',
+            r'(?:CAD|Canadian dollars?)': 'CAD',
+            r'(?:AUD|Australian dollars?)': 'AUD'
+        }
+        
+        # First check for explicit currency mentions
+        for pattern, currency in currency_patterns.items():
+            if re.search(pattern, text, re.I):
+                return currency
+                
+        # Then check for symbols
+        if '£' in text:
+            return 'GBP'
+        elif '€' in text:
+            return 'EUR'
+        elif '¥' in text:
+            return 'JPY'
+        elif '$' in text:
+            # Try to distinguish between different dollar types
+            if any(term in text.lower() for term in ['cad', 'canada']):
+                return 'CAD'
+            elif any(term in text.lower() for term in ['aud', 'australia']):
+                return 'AUD'
+            return 'USD'  # Default to USD for $ symbol
+            
+        return 'USD'  # Default currency
+
+    def find_interval(text: str) -> str:
+        """Identify salary interval."""
+        if re.search(r'per\s+hour|hourly|/\s*hr|/\s*hour', text, re.I):
+            return 'hourly'
+        elif re.search(r'per\s+month|monthly|/\s*month', text, re.I):
+            return 'monthly'
+        elif re.search(r'per\s+week|weekly|/\s*week', text, re.I):
+            return 'weekly'
+        return 'yearly'
+
+    # Try patterns in order of reliability
+    patterns = [
+        # High confidence: Structured formats
+        (r'<div[^>]*class="[^"]*pay[^"]*"[^>]*>\s*(?:[\w\s]*?:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'high'),
+        (r'salary\s*range\s*(?:is|:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'high'),
+        (r'compensation\s*(?:range|band)?\s*(?:is|:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'high'),
+        
+        # Medium confidence: Contextual patterns
+        (r'(?:salary|compensation|pay)\s*(?:range|band)?\s*(?:is|:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'medium'),
+        (r'(?:range|band)\s*(?:is|:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'medium'),
+        
+        # Low confidence: General patterns with salary context
+        (r'(?:[\w\s]*?salary[\w\s]*?:)?\s*(\$?[\d,.]+[kK]?)\s*[-–~to]+\s*(\$?[\d,.]+[kK]?)', 'low')
+    ]
+
+    # Process patterns in order
+    for pattern, confidence in patterns:
+        matches = re.finditer(pattern, text, re.I | re.DOTALL)
+        for match in matches:
+            min_amount = parse_amount(match.group(1))
+            max_amount = parse_amount(match.group(2))
+            
+            if min_amount and max_amount:
+                # Swap if min > max
+                if min_amount > max_amount:
+                    min_amount, max_amount = max_amount, min_amount
+                    
+                # Validate amounts
+                if validate_salary(min_amount, text) and validate_salary(max_amount, text):
+                    # Check ratio between min and max (shouldn't be too extreme)
+                    if max_amount / min_amount <= 3.0:  # Max should not be more than 3x min
+                        result['amount_min'] = min_amount
+                        result['amount_max'] = max_amount
+                        result['currency'] = find_currency(text)
+                        result['interval'] = find_interval(text)
+                        return result
+
+    # Single number patterns (as fallback)
+    single_patterns = [
+        r'(?:salary|compensation|pay)\s*(?:is|:)?\s*(\$?[\d,.]+[kK]?)',
+        r'(?:starting at|up to|from)\s*(\$?[\d,.]+[kK]?)'
+    ]
+
+    for pattern in single_patterns:
         match = re.search(pattern, text, re.I)
         if match:
-            # Convert k notation to full numbers
-            for group in match.groups():
-                if group:
-                    num = group.replace(',', '')
-                    if 'k' in num.lower():
-                        num = float(num.lower().replace('k', '')) * 1000
-                    numbers.append(float(num))
-            break
-            
-    if numbers:
-        result['amount_min'] = min(numbers)
-        result['amount_max'] = max(numbers) if len(numbers) > 1 else result['amount_min']
-        
-    # Check for interval indicators
-    if any(term in text.lower() for term in ['per hour', 'hourly', '/hr', '/hour']):
-        result['interval'] = 'hourly'
-    elif any(term in text.lower() for term in ['per month', 'monthly', '/month']):
-        result['interval'] = 'monthly'
-        
+            amount = parse_amount(match.group(1))
+            if amount and validate_salary(amount, text):
+                result['amount_min'] = amount
+                result['amount_max'] = amount
+                result['currency'] = find_currency(text)
+                result['interval'] = find_interval(text)
+                return result
+
     return result
 
 def extract_structured_location(text: str) -> Dict:
