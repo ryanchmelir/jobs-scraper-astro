@@ -252,14 +252,17 @@ class GreenhouseSource(BaseSource):
                 
         return listings
     
-    def get_job_detail_url(self, listing: Dict, config: Optional[Dict] = None) -> str:
+    def get_job_detail_url(self, listing: Dict | JobListing, config: Optional[Dict] = None) -> str:
         """Get the URL for a specific job listing."""
         config = config or {}
-        company_id = self._extract_company_id(listing.get('url', ''))
-        job_id = self._extract_job_id(listing.get('url', ''))
+        
+        # Handle both Dict and JobListing objects
+        url = listing['url'] if isinstance(listing, dict) else listing.url
+        company_id = self._extract_company_id(url)
+        job_id = self._extract_job_id(url)
         
         if not job_id or not company_id:
-            raise ValueError(f"Could not extract job_id or company_id from {listing.get('url')}")
+            raise ValueError(f"Could not extract job_id or company_id from {url}")
         
         # Check for cached pattern first
         if cached_pattern := config.get('working_job_detail_pattern'):
@@ -280,10 +283,18 @@ class GreenhouseSource(BaseSource):
                 success, _ = self._check_url_head(url)
                 if success:
                     # Store working pattern in raw_data for later persistence
-                    if 'config' not in listing.get('raw_data', {}):
-                        listing['raw_data'] = listing.get('raw_data', {})
-                        listing['raw_data']['config'] = {}
-                    listing['raw_data']['config']['working_job_detail_pattern'] = pattern
+                    if isinstance(listing, dict):
+                        if 'raw_data' not in listing:
+                            listing['raw_data'] = {}
+                        if 'config' not in listing['raw_data']:
+                            listing['raw_data']['config'] = {}
+                        listing['raw_data']['config']['working_job_detail_pattern'] = pattern
+                    else:
+                        if not hasattr(listing, 'raw_data'):
+                            listing.raw_data = {}
+                        if 'config' not in listing.raw_data:
+                            listing.raw_data['config'] = {}
+                        listing.raw_data['config']['working_job_detail_pattern'] = pattern
                     logging.info(f"Found working job detail pattern for {job_id}")
                     return url
             except Exception as e:
@@ -293,6 +304,10 @@ class GreenhouseSource(BaseSource):
         # If all patterns fail, use first pattern as fallback
         logging.warning(f"No working job detail pattern found for {job_id}, using default")
         return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id)
+
+    def get_listing_url(self, listing: Dict | JobListing) -> str:
+        """Get the URL for a job listing."""
+        return self.get_job_detail_url(listing)
 
     def _extract_company_id(self, url: str) -> Optional[str]:
         """Extract company ID from URL."""
@@ -310,10 +325,6 @@ class GreenhouseSource(BaseSource):
             logging.error(f"Error extracting company ID: {str(e)}")
         
         return None
-
-    def get_listing_url(self, listing) -> str:
-        """Get the URL for a job listing."""
-        return self.get_job_detail_url(listing)
 
     def _extract_with_patterns(self, text: str, patterns: List[str]) -> str:
         """Helper to extract text using a list of patterns."""
@@ -346,7 +357,7 @@ class GreenhouseSource(BaseSource):
         # Convert to markdown
         return self.html_converter.handle(html_str).strip()
 
-    def parse_job_details(self, html_content: str, job_listing: dict | JobListing) -> dict:
+    def parse_job_details(self, html_content: str, job_listing: Dict | JobListing) -> dict:
         """Parse job details from HTML content."""
         tree = html.fromstring(html_content)
         
@@ -418,11 +429,11 @@ class GreenhouseSource(BaseSource):
                         break
             
             # Get source_job_id from input
-            source_job_id = job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id']
+            source_job_id = job_listing['source_job_id'] if isinstance(job_listing, dict) else job_listing.source_job_id
             source_job_id = str(source_job_id)[:255]
             
             # Get existing raw data while preserving non-HTML fields
-            existing_raw_data = job_listing.raw_data if isinstance(job_listing, JobListing) else job_listing.get('raw_data', {})
+            existing_raw_data = job_listing['raw_data'] if isinstance(job_listing, dict) else job_listing.raw_data
             raw_data = {k: v for k, v in existing_raw_data.items() if k not in ('html', 'detail_html')}
             
             # Update raw_data with structured information
@@ -447,7 +458,7 @@ class GreenhouseSource(BaseSource):
                 'location': location,
                 'department': None,  # Will be set by DAG
                 'description': description_text,
-                'url': self.get_listing_url(job_listing),  # Add URL as main field
+                'url': self.get_listing_url(job_listing),
                 'raw_data': raw_data,
                 'active': True,
                 'first_seen': now,
@@ -458,8 +469,9 @@ class GreenhouseSource(BaseSource):
             
         except Exception as e:
             logging.error(f"Error parsing job details: {e}")
+            source_job_id = job_listing['source_job_id'] if isinstance(job_listing, dict) else job_listing.source_job_id
             return {
-                'source_job_id': job_listing.source_job_id if isinstance(job_listing, JobListing) else job_listing['source_job_id'],
+                'source_job_id': source_job_id,
                 'title': '',
                 'location': '',
                 'department': None,
