@@ -263,7 +263,13 @@ def job_scraper_dag():
                         'remote_status': raw_data.get('remote_status', 'UNKNOWN'),
                         'requirements': raw_data.get('requirements', []),
                         'benefits': raw_data.get('benefits', []),
-                        'raw_data': raw_data,
+                        'raw_data': {
+                            # Only source-specific data that doesn't fit in structured columns
+                            'departments': raw_data.get('departments', []),
+                            'office_ids': raw_data.get('office_ids', []),
+                            'source': 'greenhouse',
+                            'scraped_at': datetime.utcnow().isoformat()
+                        },
                         'metadata': {
                             'confidence_scores': metadata.get('confidence_scores', {}),
                             'parser_version': '1.0',
@@ -283,7 +289,7 @@ def job_scraper_dag():
     @task
     def update_database(source_changes_and_jobs) -> None:
         """
-        Updates the database with job changes.
+        Updates the database with job changes and their metadata.
         
         Args:
             source_changes_and_jobs: Tuple of (source, job_changes, new_jobs) from upstream tasks.
@@ -356,19 +362,26 @@ def job_scraper_dag():
                 'employment_type',
                 'remote_status',
                 'requirements',
-                'benefits',
-                'metadata'
+                'benefits'
             ]
             
             # Convert job dictionaries to tuples matching the target_fields order
             job_tuples = []
+            metadata_tuples = []  # For job_metadata table
+            
             for job in new_jobs:
                 if job['source_job_id'] in job_changes['new_jobs']:
-                    # Extract metadata and raw_data, converting dictionaries to JSON strings
-                    raw_data = json.dumps(job.get('raw_data', {}))
-                    metadata = json.dumps(job.get('metadata', {}))
-                    requirements = json.dumps(job.get('requirements', []))
-                    benefits = json.dumps(job.get('benefits', []))
+                    # Extract metadata for separate table
+                    metadata = job.get('metadata', {})
+                    
+                    # Clean raw_data by removing metadata
+                    raw_data = job.get('raw_data', {}).copy()
+                    raw_data.pop('metadata', None)  # Remove metadata if exists
+                    
+                    # Convert to JSON strings
+                    raw_data_json = json.dumps(raw_data)
+                    requirements_json = json.dumps(job.get('requirements', []))
+                    benefits_json = json.dumps(job.get('benefits', []))
                     
                     job_tuple = (
                         source['company_id'],                    # company_id
@@ -376,7 +389,7 @@ def job_scraper_dag():
                         job.get('location', ''),                 # location
                         job.get('department'),                   # department
                         job.get('description', ''),              # description
-                        raw_data,                                # raw_data
+                        raw_data_json,                           # raw_data (without metadata)
                         True,                                    # active
                         now,                                     # first_seen
                         now,                                     # last_seen
@@ -389,11 +402,19 @@ def job_scraper_dag():
                         job.get('salary_currency'),             # salary_currency
                         job.get('employment_type', 'UNKNOWN'),   # employment_type
                         job.get('remote_status', 'UNKNOWN'),     # remote_status
-                        requirements,                            # requirements
-                        benefits,                                # benefits
-                        metadata                                 # metadata
+                        requirements_json,                       # requirements
+                        benefits_json                           # benefits
                     )
                     job_tuples.append(job_tuple)
+                    
+                    # Store metadata tuple for later insertion
+                    metadata_tuples.append({
+                        'source_job_id': job['source_job_id'],
+                        'confidence_scores': json.dumps(metadata.get('confidence_scores', {})),
+                        'parser_version': metadata.get('parser_version', '1.0'),
+                        'last_parsed': metadata.get('last_parsed', now.isoformat()),
+                        'parse_count': 1  # First parse
+                    })
             
             if job_tuples:  # Only attempt insert if we have jobs to insert
                 # Create the INSERT statement with ON CONFLICT DO UPDATE
@@ -407,18 +428,54 @@ def job_scraper_dag():
                     VALUES ({placeholders})
                     ON CONFLICT (company_source_id, source_job_id) 
                     DO UPDATE SET {update_str}
+                    RETURNING id, source_job_id
                 """
                 
                 # Execute with raw SQL to handle JSON fields properly
                 with pg_hook.get_conn() as conn:
                     with conn.cursor() as cur:
                         try:
+                            # Insert jobs and get their IDs
                             cur.executemany(sql, job_tuples)
+                            job_ids = cur.fetchall()  # Get the returned IDs
+                            
+                            # Create a mapping of source_job_id to job_id
+                            job_id_map = {row[1]: row[0] for row in job_ids}
+                            
+                            # Insert metadata with job_ids
+                            metadata_sql = """
+                                INSERT INTO job_metadata 
+                                (job_id, confidence_scores, parser_version, last_parsed, parse_count)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (job_id) 
+                                DO UPDATE SET
+                                    confidence_scores = EXCLUDED.confidence_scores,
+                                    parser_version = EXCLUDED.parser_version,
+                                    last_parsed = EXCLUDED.last_parsed,
+                                    parse_count = job_metadata.parse_count + 1
+                            """
+                            
+                            # Create metadata tuples with job_ids
+                            metadata_values = [
+                                (
+                                    job_id_map[m['source_job_id']],
+                                    m['confidence_scores'],
+                                    m['parser_version'],
+                                    m['last_parsed'],
+                                    m['parse_count']
+                                )
+                                for m in metadata_tuples
+                                if m['source_job_id'] in job_id_map
+                            ]
+                            
+                            # Insert metadata
+                            cur.executemany(metadata_sql, metadata_values)
+                            
                             conn.commit()
-                            logging.info(f"Inserted/updated {len(job_tuples)} jobs for source {source['id']}")
+                            logging.info(f"Inserted/updated {len(job_tuples)} jobs and their metadata for source {source['id']}")
                         except Exception as e:
                             conn.rollback()
-                            logging.error(f"Error inserting jobs: {str(e)}")
+                            logging.error(f"Error inserting jobs and metadata: {str(e)}")
                             raise
 
     @task
