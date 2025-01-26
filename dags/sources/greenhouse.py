@@ -209,6 +209,9 @@ class GreenhouseSource(BaseSource):
         for header_tag in ['h2', 'h3', 'strong', 'b', 'p']:
             for header in section_headers:
                 try:
+                    # Initialize confidence for this iteration
+                    confidence = 0.0
+                    
                     # Use a simpler, more robust XPath expression
                     # First try exact match (case-insensitive)
                     header_text = header.lower().replace("'", "''")
@@ -217,7 +220,9 @@ class GreenhouseSource(BaseSource):
                     
                     # If no exact match, try contains with normalized text
                     if not elements:
-                        xpath = f"//{header_tag}[contains(normalize-space(), '{header_text}')]"
+                        # Escape single quotes in header text for XPath
+                        header_text = header_text.replace("'", "''")
+                        xpath = f"//{header_tag}[contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header_text}')]"
                         elements = tree.xpath(xpath)
                     
                     for element in elements:
