@@ -204,6 +204,10 @@ def job_discovery_dag():
     def process_listings(source_and_listings) -> Dict[str, List[str]]:
         """Identifies new and existing jobs and validates URLs."""
         source, listings = source_and_listings
+        if not source:
+            logging.error("Source is None in process_listings")
+            raise ValueError("Source cannot be None")
+        
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         # Get existing active jobs for this source
@@ -230,8 +234,12 @@ def job_discovery_dag():
         if source['source_type'] == SourceType.GREENHOUSE.value and listings:
             source_handler = GreenhouseSource()
             
+            # Initialize source config if None
+            if source.get('config') is None:
+                source['config'] = {}
+            
             # Skip URL testing if we already know it redirects
-            if source.get('config', {}).get('redirects_externally'):
+            if source['config'].get('redirects_externally'):
                 redirects_externally = True
                 # Mark all listings accordingly
                 for listing in listings:
@@ -282,9 +290,6 @@ def job_discovery_dag():
                     listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
             
             # Update source config
-            if source.get('config') is None:
-                source['config'] = {}
-            
             if working_pattern:
                 source['config']['working_job_detail_pattern'] = working_pattern
             elif redirects_externally:
