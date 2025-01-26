@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import httpx
 import logging
+import json
 
 from airflow.decorators import dag, task
 from airflow.models.baseoperator import chain, cross_downstream
@@ -363,9 +364,11 @@ def job_scraper_dag():
             job_tuples = []
             for job in new_jobs:
                 if job['source_job_id'] in job_changes['new_jobs']:
-                    # Extract metadata from raw_data if available
-                    raw_data = job.get('raw_data', {})
-                    metadata = job.get('metadata', {})
+                    # Extract metadata and raw_data, converting dictionaries to JSON strings
+                    raw_data = json.dumps(job.get('raw_data', {}))
+                    metadata = json.dumps(job.get('metadata', {}))
+                    requirements = json.dumps(job.get('requirements', []))
+                    benefits = json.dumps(job.get('benefits', []))
                     
                     job_tuple = (
                         source['company_id'],                    # company_id
@@ -386,8 +389,8 @@ def job_scraper_dag():
                         job.get('salary_currency'),             # salary_currency
                         job.get('employment_type', 'UNKNOWN'),   # employment_type
                         job.get('remote_status', 'UNKNOWN'),     # remote_status
-                        job.get('requirements', []),             # requirements
-                        job.get('benefits', []),                 # benefits
+                        requirements,                            # requirements
+                        benefits,                                # benefits
                         metadata                                 # metadata
                     )
                     job_tuples.append(job_tuple)
@@ -409,10 +412,14 @@ def job_scraper_dag():
                 # Execute with raw SQL to handle JSON fields properly
                 with pg_hook.get_conn() as conn:
                     with conn.cursor() as cur:
-                        cur.executemany(sql, job_tuples)
-                    conn.commit()
-                
-                logging.info(f"Inserted/updated {len(job_tuples)} jobs for source {source['id']}")
+                        try:
+                            cur.executemany(sql, job_tuples)
+                            conn.commit()
+                            logging.info(f"Inserted/updated {len(job_tuples)} jobs for source {source['id']}")
+                        except Exception as e:
+                            conn.rollback()
+                            logging.error(f"Error inserting jobs: {str(e)}")
+                            raise
 
     @task
     def update_scrape_time(source: Dict) -> None:

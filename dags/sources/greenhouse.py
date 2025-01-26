@@ -8,6 +8,7 @@ import random
 import re
 from datetime import datetime
 import logging
+import json
 
 from .base import BaseSource, JobListing
 
@@ -212,18 +213,9 @@ class GreenhouseSource(BaseSource):
                     # Initialize confidence for this iteration
                     confidence = 0.0
                     
-                    # Use a simpler, more robust XPath expression
-                    # First try exact match (case-insensitive)
-                    header_text = header.lower().replace("'", "''")
-                    xpath = f"//{header_tag}[translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='{header_text}']"
+                    # First try exact match with simpler XPath
+                    xpath = f"//{header_tag}[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header.lower()}')]"
                     elements = tree.xpath(xpath)
-                    
-                    # If no exact match, try contains with normalized text
-                    if not elements:
-                        # Escape single quotes in header text for XPath
-                        header_text = header_text.replace("'", "''")
-                        xpath = f"//{header_tag}[contains(translate(normalize-space(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{header_text}')]"
-                        elements = tree.xpath(xpath)
                     
                     for element in elements:
                         # Get the parent section and next sibling sections
