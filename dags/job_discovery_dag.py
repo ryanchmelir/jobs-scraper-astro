@@ -391,7 +391,7 @@ def job_discovery_dag():
                                         %(patterns)s::jsonb,
                                         true
                                     )
-                                    ELSE config
+                                    ELSE COALESCE(config, '{}'::jsonb)
                                 END
                             WHERE id = %(source_id)s
                         """, {
