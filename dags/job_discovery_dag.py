@@ -111,6 +111,9 @@ def job_discovery_dag():
         
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
+        # Add logging for initial config state
+        logging.info(f"Initial source config in scrape_listings: {json.dumps(source.get('config'))}")
+        
         try:
             listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
             scraping_config = source_handler.prepare_scraping_config(listings_url)
@@ -208,6 +211,9 @@ def job_discovery_dag():
             logging.error("Source is None in process_listings")
             raise ValueError("Source cannot be None")
         
+        # Add logging for incoming config
+        logging.info(f"Incoming source config in process_listings: {json.dumps(source.get('config'))}")
+        
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         # Get existing active jobs for this source
@@ -293,10 +299,16 @@ def job_discovery_dag():
             # Update source config
             if working_pattern:
                 source['config']['working_job_detail_pattern'] = working_pattern
+                logging.info(f"Updated working_job_detail_pattern to: {working_pattern}")
             elif redirects_externally:
                 source['config']['redirects_externally'] = True
-            if url_issues:  # Only set URL issues if explicitly true
+                logging.info("Set redirects_externally to True")
+            if url_issues:
                 source['config']['url_issues'] = True
+                logging.info("Set url_issues to True")
+            
+            # Add logging for final config state
+            logging.info(f"Final source config in process_listings: {json.dumps(source.get('config'))}")
         
         logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
                     f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
@@ -449,6 +461,9 @@ def job_discovery_dag():
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
         
+        # Add logging for incoming config
+        logging.info(f"Incoming source config in update_source_status: {json.dumps(source.get('config'))}")
+        
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
                 try:
@@ -498,12 +513,17 @@ def job_discovery_dag():
                                     ELSE config
                                 END
                             WHERE id = %(source_id)s
+                            RETURNING config
                         """, {
                             'source_id': source['id'],
                             'now': now,
                             'next_scrape': next_scrape,
                             'new_config': json.dumps(source.get('config', {}))
                         })
+                        
+                        # Add logging for final config state
+                        updated_config = cur.fetchone()[0] if cur.rowcount > 0 else None
+                        logging.info(f"Final updated config in database: {json.dumps(updated_config)}")
                         
                         cur.execute("""
                             DELETE FROM company_source_issues
