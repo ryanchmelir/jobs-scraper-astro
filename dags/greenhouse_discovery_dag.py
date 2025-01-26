@@ -141,10 +141,12 @@ def greenhouse_discovery_dag():
                         cur.execute("""
                             INSERT INTO companies (
                                 name,
+                                active,
                                 created_at,
                                 updated_at
                             ) VALUES (
                                 %(name)s,
+                                true,
                                 %(now)s,
                                 %(now)s
                             )
@@ -162,25 +164,29 @@ def greenhouse_discovery_dag():
                                 company_id,
                                 source_type,
                                 source_id,
+                                config,
                                 active,
-                                created_at,
-                                updated_at,
+                                last_scraped,
+                                next_scrape_time,
                                 scrape_interval
                             ) VALUES (
                                 %(company_id)s,
                                 %(source_type)s,
                                 %(source_id)s,
+                                %(config)s,
                                 true,
                                 %(now)s,
-                                %(now)s,
+                                %(next_scrape)s,
                                 %(interval)s
                             )
                         """, {
                             'company_id': company_db_id,
                             'source_type': SourceType.GREENHOUSE.value,
                             'source_id': company_id,
+                            'config': {},  # Empty JSON config to start
                             'now': now,
-                            'interval': 1440  # Default to daily scraping
+                            'next_scrape': now + timedelta(minutes=1),  # Start scraping in 1 minute
+                            'interval': 30  # Default to daily scraping
                         })
                         
                         logging.info(f"Created company and source records for {company_id}")
