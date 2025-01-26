@@ -4,7 +4,7 @@ Uses ScrapingBee's Google Search API to find new job boards and creates
 company records for ones we don't already track.
 """
 from datetime import datetime, timedelta
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 import logging
 import re
 import httpx
@@ -12,6 +12,7 @@ from airflow.decorators import dag, task
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from config.settings import SCRAPING_BEE_API_KEY
 from infrastructure.models import SourceType
+from urllib.parse import urlparse
 
 # Default arguments for all tasks
 default_args = {
@@ -24,22 +25,39 @@ default_args = {
     'depends_on_past': False,
 }
 
-def extract_company_id(url: str) -> str:
+def extract_company_id(url: str) -> Optional[str]:
     """Extract company ID from Greenhouse URL."""
-    # Remove protocol and www if present
-    url = url.replace('https://', '').replace('http://', '').replace('www.', '')
-    
-    # Extract company ID from various URL formats
-    patterns = [
-        r'boards\.greenhouse\.io/([^/]+)/?',  # matches boards.greenhouse.io/company
-        r'job-boards\.greenhouse\.io/([^/]+)/?',  # matches job-boards.greenhouse.io/company
-    ]
-    
-    for pattern in patterns:
-        if match := re.search(pattern, url):
-            return match.group(1)
-    
-    return None
+    try:
+        parsed = urlparse(url)
+        
+        # Only handle greenhouse.io domains
+        if not parsed.netloc.endswith('greenhouse.io'):
+            return None
+            
+        # Split path into components
+        path_parts = [p for p in parsed.path.strip('/').split('/') if p]
+        if not path_parts:
+            return None
+            
+        # Skip embed URLs
+        if path_parts[0] == 'embed':
+            return None
+            
+        # Get company ID from first path component
+        company_id = path_parts[0]
+        
+        # Skip known non-company paths
+        if company_id in ['embed', 'jobs', 'api']:
+            return None
+            
+        # Clean up the ID
+        company_id = company_id.split('?')[0]  # Remove query params
+        company_id = company_id.split('#')[0]  # Remove fragments
+        
+        return company_id
+            
+    except Exception:
+        return None
 
 @dag(
     dag_id='greenhouse_company_discovery',
@@ -86,7 +104,7 @@ def greenhouse_discovery_dag():
             raise
     
     @task
-    def extract_company_ids(search_results: List[Dict]) -> Set[str]:
+    def extract_company_ids(search_results: List[Dict]) -> List[str]:
         """
         Extract unique company IDs from search results.
         Filters out invalid or malformed IDs.
@@ -94,13 +112,16 @@ def greenhouse_discovery_dag():
         company_ids = set()
         
         for result in search_results:
-            if company_id := extract_company_id(result['url']):
-                # Skip common false positives and job detail pages
-                if company_id not in ['jobs', 'careers', 'job', 'career'] and '/jobs/' not in result['url']:
-                    company_ids.add(company_id)
+            url = result.get('url', '')
+            if not url:
+                continue
+            
+            company_id = extract_company_id(url)
+            if company_id:
+                company_ids.add(company_id)
         
         logging.info(f"Extracted {len(company_ids)} unique company IDs")
-        return list(company_ids)
+        return sorted(list(company_ids))
     
     @task
     def filter_existing_companies(company_ids: List[str]) -> List[str]:
@@ -145,16 +166,17 @@ def greenhouse_discovery_dag():
                                 created_at,
                                 updated_at
                             ) VALUES (
-                                %(name)s,
+                                %s,
                                 true,
-                                %(now)s,
-                                %(now)s
+                                %s,
+                                %s
                             )
                             RETURNING id
-                        """, {
-                            'name': company_id.replace('-', ' ').title(),
-                            'now': now
-                        })
+                        """, (
+                            company_id.replace('-', ' ').title(),
+                            now,
+                            now
+                        ))
                         
                         company_db_id = cur.fetchone()[0]
                         
@@ -170,24 +192,24 @@ def greenhouse_discovery_dag():
                                 next_scrape_time,
                                 scrape_interval
                             ) VALUES (
-                                %(company_id)s,
-                                %(source_type)s,
-                                %(source_id)s,
-                                %(config)s,
+                                %s,
+                                %s,
+                                %s,
+                                %s,
                                 true,
-                                %(now)s,
-                                %(next_scrape)s,
-                                %(interval)s
+                                %s,
+                                %s,
+                                %s
                             )
-                        """, {
-                            'company_id': company_db_id,
-                            'source_type': SourceType.GREENHOUSE.value,
-                            'source_id': company_id,
-                            'config': {},  # Empty JSON config to start
-                            'now': now,
-                            'next_scrape': now + timedelta(minutes=1),  # Start scraping in 1 minute
-                            'interval': 30  # Default to daily scraping
-                        })
+                        """, (
+                            company_db_id,
+                            SourceType.GREENHOUSE.value,
+                            company_id,
+                            '{}',
+                            now,
+                            now + timedelta(minutes=1),
+                            30
+                        ))
                         
                         logging.info(f"Created company and source records for {company_id}")
                         
