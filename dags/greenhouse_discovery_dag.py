@@ -63,7 +63,7 @@ def extract_company_id(url: str) -> Optional[str]:
     dag_id='greenhouse_company_discovery',
     default_args=default_args,
     description='Discovers new Greenhouse companies via Google Search',
-    schedule_interval=timedelta(days=1),
+    schedule_interval=timedelta(hours=12),
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['discovery', 'greenhouse'],
