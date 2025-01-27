@@ -208,7 +208,7 @@ def greenhouse_discovery_dag():
                             '{}',
                             now,
                             now + timedelta(minutes=1),
-                            30
+                            60
                         ))
                         
                         logging.info(f"Created company and source records for {company_id}")
