@@ -139,6 +139,14 @@ def job_details_dag():
                     'error': f"Unsupported source type: {job['source_type']}"
                 }
             
+            # Get existing job data for raw_data preservation
+            existing_job = pg_hook.get_first("""
+                SELECT raw_data
+                FROM jobs
+                WHERE id = %(job_id)s
+            """, {'job_id': job['job_id']})
+            existing_raw_data = existing_job[0] if existing_job else {}
+            
             # Reconstruct proper URL using source config
             url, status, _ = source_handler.get_job_detail_url({
                 'source_job_id': job['source_job_id'],
@@ -148,10 +156,25 @@ def job_details_dag():
             
             # If URL is invalid or redirects externally, fail gracefully
             if status == 'invalid':
+                error_msg = f"Invalid job URL pattern for job {job['job_id']}"
+                logging.error(error_msg)
+                
+                pg_hook.run("""
+                    INSERT INTO job_scraping_issues (job_id, failure_count, last_failure, last_error)
+                    VALUES (%(job_id)s, 1, NOW(), %(error)s)
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        failure_count = job_scraping_issues.failure_count + 1,
+                        last_failure = NOW(),
+                        last_error = %(error)s
+                """, parameters={
+                    'job_id': job['job_id'],
+                    'error': error_msg
+                })
+                
                 return {
                     'job_id': job['job_id'],
                     'success': False,
-                    'error': f"Invalid job URL pattern for job {job['job_id']}"
+                    'error': error_msg
                 }
             
             scraping_config = source_handler.prepare_scraping_config(url)
@@ -208,11 +231,11 @@ def job_details_dag():
                         'error': error_msg
                     }
                 
-                # Parse job details
+                # Parse job details with existing raw_data
                 details = source_handler.parse_job_details(response.text, {
                     'source_job_id': job['source_job_id'],
-                    'url': job['url'],
-                    'raw_data': {}
+                    'url': url,  # Use properly constructed URL
+                    'raw_data': existing_raw_data
                 })
                 
                 # Add structured data
@@ -233,10 +256,16 @@ def job_details_dag():
                     )
                 }
                 
+                # Merge raw_data instead of overwriting
                 if details.get('raw_data'):
-                    details['raw_data']['structured_data'] = structured_data
+                    merged_raw_data = {**existing_raw_data, **details['raw_data']}
+                    merged_raw_data['structured_data'] = structured_data
+                    details['raw_data'] = merged_raw_data
                 else:
-                    details['raw_data'] = {'structured_data': structured_data}
+                    details['raw_data'] = {
+                        **existing_raw_data,
+                        'structured_data': structured_data
+                    }
                 
                 # Clear any previous issues on success
                 pg_hook.run("""
