@@ -60,7 +60,7 @@ def job_details_dag():
     """Creates a DAG for scraping detailed job information."""
     
     @task
-    def get_jobs_needing_details(batch_size: int = 1000) -> List[Dict]:
+    def get_jobs_needing_details(batch_size: int = 100) -> List[Dict]:
         """
         Gets jobs that need detailed information scraped.
         

@@ -53,7 +53,7 @@ def job_discovery_dag():
     """Creates a DAG for discovering new job listings."""
     
     @task
-    def get_company_sources_to_scrape(batch_size: int = 175) -> List[Dict]:
+    def get_company_sources_to_scrape(batch_size: int = 50) -> List[Dict]:
         """
         Selects company sources that are due for scraping.
         Uses a larger batch size since we're just doing quick listing scrapes.
