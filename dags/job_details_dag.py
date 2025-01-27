@@ -139,9 +139,24 @@ def job_details_dag():
                     'error': f"Unsupported source type: {job['source_type']}"
                 }
             
-            scraping_config = source_handler.prepare_scraping_config(job['url'])
+            # Reconstruct proper URL using source config
+            url, status, _ = source_handler.get_job_detail_url({
+                'source_job_id': job['source_job_id'],
+                'url': job['url'],
+                'raw_data': {'source_id': job['source_id']}
+            }, job['config'])
             
-            logging.info(f"Scraping job details from {job['url']} (chunk {job['chunk_id']})")
+            # If URL is invalid or redirects externally, fail gracefully
+            if status == 'invalid':
+                return {
+                    'job_id': job['job_id'],
+                    'success': False,
+                    'error': f"Invalid job URL pattern for job {job['job_id']}"
+                }
+            
+            scraping_config = source_handler.prepare_scraping_config(url)
+            
+            logging.info(f"Scraping job details from {url} (chunk {job['chunk_id']})")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 
