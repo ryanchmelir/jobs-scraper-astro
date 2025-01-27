@@ -21,6 +21,7 @@ import json
 from airflow.decorators import dag, task
 from airflow.models.baseoperator import chain
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.exceptions import AirflowException
 from config.settings import SCRAPING_BEE_API_KEY
 from infrastructure.models import SourceType
 from sources.greenhouse import GreenhouseSource
@@ -140,10 +141,30 @@ def job_discovery_dag():
                         'error': error_msg
                     })
                     
-                    from airflow.exceptions import AirflowException
+                    # For rate limiting, we still want to retry
                     raise AirflowException(error_msg)
                 
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    error_msg = str(e)
+                    logging.error(f"Error scraping {listings_url}: {error_msg}")
+                    
+                    # Record the error but don't fail the task
+                    pg_hook.run("""
+                        INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
+                        VALUES (%(source_id)s, 1, NOW(), %(error)s)
+                        ON CONFLICT (company_source_id) DO UPDATE SET
+                            failure_count = company_source_issues.failure_count + 1,
+                            last_failure = NOW(),
+                            last_error = %(error)s
+                    """, parameters={
+                        'source_id': source['id'],
+                        'error': error_msg
+                    })
+                    
+                    # Return empty listings instead of failing
+                    return []
                 
                 listings = source_handler.parse_listings_page(response.text, source['source_id'])
                 listings_dict = [
@@ -184,24 +205,28 @@ def job_discovery_dag():
                 return listings_dict
                 
         except Exception as e:
+            if isinstance(e, AirflowException):
+                # Re-raise rate limiting exceptions for retry
+                raise
+            
             error_msg = str(e)
             logging.error(f"Error scraping {listings_url}: {error_msg}")
             
-            # Don't update issues table for rate limiting as it's handled above
-            if not isinstance(e, AirflowException):
-                pg_hook.run("""
-                    INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
-                    VALUES (%(source_id)s, 1, NOW(), %(error)s)
-                    ON CONFLICT (company_source_id) DO UPDATE SET
-                        failure_count = company_source_issues.failure_count + 1,
-                        last_failure = NOW(),
-                        last_error = %(error)s
-                """, parameters={
-                    'source_id': source['id'],
-                    'error': error_msg
-                })
+            # Record all other errors but don't fail the task
+            pg_hook.run("""
+                INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
+                VALUES (%(source_id)s, 1, NOW(), %(error)s)
+                ON CONFLICT (company_source_id) DO UPDATE SET
+                    failure_count = company_source_issues.failure_count + 1,
+                    last_failure = NOW(),
+                    last_error = %(error)s
+            """, parameters={
+                'source_id': source['id'],
+                'error': error_msg
+            })
             
-            raise  # Re-raise to trigger task failure
+            # Return empty listings instead of failing
+            return []
 
     @task
     def process_listings(source_and_listings) -> Dict[str, List[str]]:
