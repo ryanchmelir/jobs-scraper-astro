@@ -170,23 +170,27 @@ class GreenhouseSource(BaseSource):
         - https://company.com/careers/1234
         - https://boards.greenhouse.io/embed/job_app?for=company&token=1234
         - /embed/job_app?token=1234
+        - https://boards.greenhouse.io/company/jobs/1234?gh_jid=1234
         """
         try:
-            # Try to extract from token parameter first
-            if 'token=' in href:
-                token_part = href.split('token=')[-1]
-                return token_part.split('&')[0]
+            # Split URL into path and query parts
+            base_url = href.split('?')[0]
             
-            # Try to extract from URL path
-            parts = href.strip('/').split('/')
-            # Get the last part that's numeric
+            # First try to extract from path
+            parts = base_url.strip('/').split('/')
             for part in reversed(parts):
                 if part.isdigit():
                     return part
-                # Handle if ID is part of a larger string
-                numeric_part = ''.join(c for c in part if c.isdigit())
-                if numeric_part:
-                    return numeric_part
+            
+            # If not found in path, check URL parameters
+            if '?' in href:
+                query_part = href.split('?')[1]
+                params = dict(param.split('=') for param in query_part.split('&'))
+                
+                # Check known parameter names
+                for param in ['token', 'gh_jid']:
+                    if param in params and params[param].isdigit():
+                        return params[param]
             
             return None
         except Exception as e:
@@ -273,13 +277,20 @@ class GreenhouseSource(BaseSource):
                     'original_url': job_url,
                     'scraped_at': datetime.utcnow().isoformat()
                 }
+
+                # Get proper URL using source handler
+                url, status, _ = self.get_job_detail_url({
+                    'source_job_id': job_id,
+                    'url': job_url,
+                    'raw_data': raw_data
+                }, {})
                 
                 listing = JobListing(
                     source_job_id=job_id,
                     title=title,
                     location=location,
                     department=department,
-                    url=job_url,
+                    url=url,  # Use the properly constructed URL
                     raw_data=raw_data
                 )
                 listings.append(listing)
