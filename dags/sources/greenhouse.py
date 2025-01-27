@@ -197,7 +197,7 @@ class GreenhouseSource(BaseSource):
             logging.debug(f"Error extracting job ID from {href}: {str(e)}")
             return None
 
-    def parse_listings_page(self, html_content: str, source_id: str) -> List[JobListing]:
+    def parse_listings_page(self, html_content: str, source_id: str, config: Optional[Dict] = None) -> List[JobListing]:
         """
         Parse the Greenhouse job board HTML into JobListing objects.
         This is a fast parser that only extracts essential fields needed for job discovery.
@@ -278,12 +278,12 @@ class GreenhouseSource(BaseSource):
                     'scraped_at': datetime.utcnow().isoformat()
                 }
 
-                # Get proper URL using source handler
+                # Get proper URL using source handler with source's config
                 url, status, _ = self.get_job_detail_url({
                     'source_job_id': job_id,
                     'url': job_url,
                     'raw_data': raw_data
-                }, {})
+                }, config or {})
                 
                 listing = JobListing(
                     source_job_id=job_id,

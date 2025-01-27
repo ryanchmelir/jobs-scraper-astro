@@ -166,7 +166,7 @@ def job_discovery_dag():
                     # Return empty listings instead of failing
                     return []
                 
-                listings = source_handler.parse_listings_page(response.text, source['source_id'])
+                listings = source_handler.parse_listings_page(response.text, source['source_id'], source.get('config', {}))
                 listings_dict = [
                     {
                         'source_job_id': listing.source_job_id,
