@@ -199,12 +199,14 @@ class GreenhouseSource(BaseSource):
 
     def parse_listings_page(self, html_content: str, source_id: str, config: Optional[Dict] = None) -> List[JobListing]:
         """
-        Parse the Greenhouse job board HTML into JobListing objects.
-        This is a fast parser that only extracts essential fields needed for job discovery.
+        Optimized parser that uses raw hrefs and converts to absolute URLs
         """
         listings = []
         tree = html.fromstring(html_content)
         
+        # Get base URL from the page for resolving relative URLs
+        base_url = tree.xpath('//base/@href')[0] if tree.xpath('//base/@href') else self.BASE_URLS[0].format(company=source_id)
+
         # Build department ID to name mapping for traditional format
         dept_map = {}
         for dept_header in tree.xpath('//h3[@id]|//h4[@id]'):
@@ -233,6 +235,12 @@ class GreenhouseSource(BaseSource):
                     
                 job_link = job_links[0]
                 job_url = job_link.get('href')
+                
+                # Convert to absolute URL
+                if job_url.startswith('/'):
+                    job_url = f"{base_url.rstrip('/')}{job_url}"
+                elif not job_url.startswith('http'):
+                    job_url = f"{base_url}{job_url}"
                 
                 # Extract title - handle both formats
                 title_elements = (
@@ -270,27 +278,20 @@ class GreenhouseSource(BaseSource):
                     logging.error(f"Could not extract job ID from URL: {job_url}")
                     continue
                 
-                # Create minimal raw data for discovery
+                # Create raw data with original URL
                 raw_data = {
                     'source': 'greenhouse',
                     'source_id': source_id,
-                    'original_url': job_url,
+                    'original_url': job_url,  # Store the direct href
                     'scraped_at': datetime.utcnow().isoformat()
                 }
 
-                # Get proper URL using source handler with source's config
-                url, status, _ = self.get_job_detail_url({
-                    'source_job_id': job_id,
-                    'url': job_url,
-                    'raw_data': raw_data
-                }, config or {})
-                
                 listing = JobListing(
                     source_job_id=job_id,
                     title=title,
                     location=location,
                     department=department,
-                    url=url,  # Use the properly constructed URL
+                    url=job_url,  # Use direct href
                     raw_data=raw_data
                 )
                 listings.append(listing)

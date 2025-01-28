@@ -45,8 +45,8 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
-    max_active_tasks=20,  # High SQL concurrency
-    max_active_runs=1,
+    max_active_tasks=5,  # Matches scraping_bee pool size
+    max_active_runs=2,   # Allow pipeline overlap
     dagrun_timeout=timedelta(minutes=30),
 )
 def job_discovery_dag():
@@ -79,24 +79,17 @@ def job_discovery_dag():
         """
         sources = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
         
-        # Split sources into chunks of 5 to respect ScrapingBee's concurrent request limit
-        chunked_sources = []
-        for i in range(0, len(sources), 5):
-            chunk = sources[i:i+5]
-            chunked_sources.extend([
-                {
-                    'id': source[0],
-                    'company_id': source[1],
-                    'source_type': source[2],
-                    'source_id': source[3],
-                    'config': source[4],
-                    'failure_count': source[5],
-                    'chunk_id': i // 5  # Add chunk ID for potential use in rate limiting
-                }
-                for source in chunk
-            ])
-        
-        return chunked_sources
+        return [
+            {
+                'id': source[0],
+                'company_id': source[1],
+                'source_type': source[2],
+                'source_id': source[3],
+                'config': source[4],
+                'failure_count': source[5]
+            }
+            for source in sources
+        ]
 
     @task(pool='scraping_bee', pool_slots=1)
     def scrape_listings(source: Dict) -> List[Dict]:
@@ -190,15 +183,18 @@ def job_discovery_dag():
                     WHERE company_source_id = %(source_id)s
                 """, parameters={'source_id': source['id']})
                 
-                # Update source success timestamp
+                # Update source with listing pattern config
                 pg_hook.run("""
                     UPDATE company_sources 
-                    SET config = %(config)s,
-                        next_scrape_time = NOW() + INTERVAL '10 minutes'
+                    SET config = json_build_object(
+                        'working_url_pattern', 
+                        COALESCE(%(pattern)s, config->>'working_url_pattern')
+                    ),
+                    next_scrape_time = NOW() + INTERVAL '10 minutes'
                     WHERE id = %(source_id)s
                 """, parameters={
                     'source_id': source['id'],
-                    'config': json.dumps(source['config'])
+                    'pattern': source['config'].get('working_url_pattern')
                 })
                 
                 logging.info(f"Found {len(listings_dict)} listings")
@@ -209,10 +205,10 @@ def job_discovery_dag():
                 # Re-raise rate limiting exceptions for retry
                 raise
             
+            # Preserve failure logging
             error_msg = str(e)
             logging.error(f"Error scraping {listings_url}: {error_msg}")
             
-            # Record all other errors but don't fail the task
             pg_hook.run("""
                 INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
                 VALUES (%(source_id)s, 1, NOW(), %(error)s)
@@ -230,126 +226,36 @@ def job_discovery_dag():
 
     @task
     def process_listings(source_and_listings) -> Dict[str, List[str]]:
-        """Identifies new and existing jobs and validates URLs."""
         source, listings = source_and_listings
-        if not source:
-            logging.error("Source is None in process_listings")
-            raise ValueError("Source cannot be None")
-        
-        # Add logging for incoming config
-        logging.info(f"Incoming source config in process_listings: {json.dumps(source.get('config'))}")
-        
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
-        # Get existing active jobs for this source
-        sql = """
-            SELECT source_job_id 
-            FROM jobs 
-            WHERE company_source_id = %(source_id)s 
-            AND active = true
-        """
-        existing_jobs = pg_hook.get_records(sql, parameters={'source_id': source['id']})
+        with pg_hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    WITH existing AS (
+                        SELECT source_job_id 
+                        FROM jobs 
+                        WHERE company_source_id = %(source_id)s 
+                        AND active = true
+                    )
+                    SELECT ARRAY_AGG(source_job_id) FROM existing
+                """, {'source_id': source['id']})
+                
+                result = cur.fetchone()
+                existing_job_ids = set(result[0] or []) if result else set()
         
-        existing_job_ids = {job[0] for job in existing_jobs}
         scraped_job_ids = {listing['source_job_id'] for listing in listings}
         
-        new_jobs = scraped_job_ids - existing_job_ids
-        removed_jobs = existing_job_ids - scraped_job_ids
-        existing_jobs = scraped_job_ids & existing_job_ids
-        
-        # For Greenhouse sources, validate URLs efficiently
-        url_status = None
-        working_pattern = None
-        url_issues = False  # New variable to track URL issues
-        redirects_externally = False
-        
-        if source['source_type'] == SourceType.GREENHOUSE.value and listings:
-            source_handler = GreenhouseSource()
-            
-            # Initialize source config if None
-            if source.get('config') is None:
-                source['config'] = {}
-            
-            # Skip URL testing if we already know it redirects
-            if source['config'].get('redirects_externally'):
-                redirects_externally = True
-                # Mark all listings accordingly
-                for listing in listings:
-                    if not listing.get('raw_data'):
-                        listing['raw_data'] = {}
-                    listing['raw_data']['redirects_externally'] = True
-            
-            # Test URL patterns with first job regardless of new/existing
-            sample_listing = listings[0]  # Take first listing
-            
-            # Get URL status for sample job
-            url, status, pattern = source_handler.get_job_detail_url(sample_listing, source.get('config', {}))
-            url_status = status
-            
-            # Update all listings based on the result
-            if status == '200':
-                # We found a working pattern - use it for all jobs
-                working_pattern = pattern
-                for listing in listings:
-                    try:
-                        listing['url'] = pattern.format(
-                            company=source['source_id'],
-                            job_id=listing['source_job_id']
-                        )
-                        if not listing.get('raw_data'):
-                            listing['raw_data'] = {}
-                        listing['raw_data']['config'] = {'working_job_detail_pattern': pattern}
-                    except Exception as e:
-                        logging.warning(f"Failed to apply working pattern to job {listing['source_job_id']}: {str(e)}")
-                        
-            elif status == '302':
-                # All jobs redirect externally - keep original URLs if well-formed
-                redirects_externally = True
-                for listing in listings:
-                    if not listing.get('raw_data'):
-                        listing['raw_data'] = {}
-                    listing['raw_data']['redirects_externally'] = True
-                    url_issues = False  # Explicitly mark no URL issues when redirects work
-                    
-            else:  # status == 'invalid'
-                # No working patterns found - try to use well-formed URLs or construct standard ones
-                for listing in listings:
-                    if not listing.get('raw_data'):
-                        listing['raw_data'] = {}
-                    listing['raw_data']['needs_details'] = False
-                    url_issues = True  # Mark URL issues when invalid
-                    # URL will be either the original well-formed URL or a constructed Greenhouse URL
-                    listing['url'], _, _ = source_handler.get_job_detail_url(listing, source.get('config', {}))
-            
-            # Update source config
-            if working_pattern:
-                source['config']['working_job_detail_pattern'] = working_pattern
-                logging.info(f"Updated working_job_detail_pattern to: {working_pattern}")
-            elif redirects_externally:
-                source['config']['redirects_externally'] = True
-                logging.info("Set redirects_externally to True")
-            if url_issues:
-                source['config']['url_issues'] = True
-                logging.info("Set url_issues to True")
-            
-            # Add logging for final config state
-            logging.info(f"Final source config in process_listings: {json.dumps(source.get('config'))}")
-        
-        logging.info(f"Source {source['id']}: {len(new_jobs)} new, "
-                    f"{len(removed_jobs)} removed, {len(existing_jobs)} existing")
-        
         return {
-            'new_jobs': list(new_jobs),
-            'removed_jobs': list(removed_jobs),
-            'existing_jobs': list(existing_jobs),
-            'url_status': url_status,
-            'working_pattern': working_pattern,
-            'updated_config': source['config']  # Return the updated config
+            'new_jobs': list(scraped_job_ids - existing_job_ids),
+            'removed_jobs': list(existing_job_ids - scraped_job_ids),
+            'existing_jobs': list(scraped_job_ids & existing_job_ids)
         }
 
     @task
     def save_new_jobs(source_changes_and_listings) -> None:
-        """Saves newly discovered jobs to the database."""
+        """Save jobs with direct URLs"""
+        from psycopg2.extras import execute_batch
         source, job_changes, listings = source_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
@@ -394,81 +300,43 @@ def job_discovery_dag():
                     
                     # Insert new jobs with minimal data
                     if job_changes['new_jobs']:
-                        new_job_listings = [
-                            listing for listing in listings
-                            if listing['source_job_id'] in job_changes['new_jobs']
-                        ]
+                        new_job_listings = [listing for listing in listings
+                                          if listing['source_job_id'] in job_changes['new_jobs']]
                         
                         logging.info(f"Inserting {len(new_job_listings)} new jobs")
-                        for listing in new_job_listings:
-                            # Only set needs_details = true if:
-                            # 1. We have a working pattern (status = '200')
-                            # 2. No redirects_externally flag
-                            # 3. No explicit needs_details = false in raw_data
-                            needs_details = (
-                                job_changes.get('url_status') == '200' and
-                                not job_changes.get('redirects_externally', False) and
-                                not listing.get('raw_data', {}).get('redirects_externally', False) and
-                                not listing.get('raw_data', {}).get('needs_details') is False
+                        
+                        insert_params = [{
+                            'company_id': source['company_id'],
+                            'title': listing['title'],
+                            'location': listing['location'],
+                            'department': listing['department'],
+                            'url': listing['url'],
+                            'raw_data': json.dumps(listing.get('raw_data', {})),
+                            'now': now,
+                            'source_id': source['id'],
+                            'source_job_id': listing['source_job_id']
+                        } for listing in new_job_listings]
+                        
+                        execute_batch(cur, """
+                            INSERT INTO jobs (
+                                company_id, title, location, department, 
+                                url, raw_data, active, first_seen, 
+                                last_seen, created_at, updated_at, 
+                                company_source_id, source_job_id, needs_details
+                            ) VALUES (
+                                %(company_id)s, %(title)s, %(location)s,
+                                %(department)s, %(url)s, %(raw_data)s, true,
+                                %(now)s, %(now)s, %(now)s, %(now)s,
+                                %(source_id)s, %(source_job_id)s, false
                             )
-                            
-                            logging.info(f"Inserting job {listing['source_job_id']} with needs_details={needs_details}")
-                            logging.debug(f"Job data: url={listing['url']}, "
-                                       f"title={listing['title']}, "
-                                       f"raw_data={json.dumps(listing.get('raw_data', {}))}")
-                            
-                            cur.execute("""
-                                INSERT INTO jobs (
-                                    company_id,
-                                    title,
-                                    location,
-                                    department,
-                                    url,
-                                    raw_data,
-                                    active,
-                                    first_seen,
-                                    last_seen,
-                                    created_at,
-                                    updated_at,
-                                    company_source_id,
-                                    source_job_id,
-                                    needs_details
-                                ) VALUES (
-                                    %(company_id)s,
-                                    %(title)s,
-                                    %(location)s,
-                                    %(department)s,
-                                    %(url)s,
-                                    %(raw_data)s,
-                                    true,
-                                    %(now)s,
-                                    %(now)s,
-                                    %(now)s,
-                                    %(now)s,
-                                    %(source_id)s,
-                                    %(source_job_id)s,
-                                    %(needs_details)s
-                                )
-                                ON CONFLICT (company_source_id, source_job_id) DO UPDATE
-                                SET active = true,
-                                    last_seen = EXCLUDED.last_seen,
-                                    updated_at = EXCLUDED.updated_at,
-                                    needs_details = EXCLUDED.needs_details
-                                RETURNING id
-                            """, {
-                                'company_id': source['company_id'],
-                                'title': listing['title'],
-                                'location': listing['location'],
-                                'department': listing['department'],
-                                'url': listing['url'],
-                                'raw_data': json.dumps(listing.get('raw_data', {})),
-                                'now': now,
-                                'source_id': source['id'],
-                                'source_job_id': listing['source_job_id'],
-                                'needs_details': needs_details
-                            })
-                            job_id = cur.fetchone()[0]
-                            logging.info(f"Inserted/updated job with id={job_id}")
+                            ON CONFLICT (company_source_id, source_job_id) DO UPDATE SET
+                                active = EXCLUDED.active,
+                                last_seen = EXCLUDED.last_seen,
+                                updated_at = EXCLUDED.updated_at,
+                                needs_details = EXCLUDED.needs_details
+                        """, insert_params, page_size=100)
+                        
+                        logging.info(f"Bulk inserted/updated {len(new_job_listings)} jobs")
                     
                     conn.commit()
                     logging.info("Successfully committed all job changes to database")
@@ -481,16 +349,10 @@ def job_discovery_dag():
 
     @task
     def update_source_status(source_and_changes_and_listings) -> None:
-        """Updates source success/failure status and next scrape time."""
+        """Updates source status with failure tracking"""
         source, job_changes, listings = source_and_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
-        
-        # Use the updated config from job_changes if available
-        updated_config = job_changes.get('updated_config') if job_changes else source.get('config')
-        
-        # Add logging for incoming config
-        logging.info(f"Incoming source config in update_source_status: {json.dumps(updated_config)}")
         
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
@@ -505,60 +367,32 @@ def job_discovery_dag():
                     interval_minutes = cur.fetchone()[0] or 1440  # Default to 24 hours
                     next_scrape = now + timedelta(minutes=interval_minutes)
                     
-                    # Update source status and config
                     if listings:
                         # Success - clear any failure records and update config
                         cur.execute("""
                             UPDATE company_sources 
                             SET last_scraped = %(now)s,
                                 next_scrape_time = %(next_scrape)s,
-                                config = CASE 
-                                    WHEN %(new_config)s::json IS NOT NULL THEN
-                                        json_build_object(
-                                            'working_url_pattern', 
-                                            COALESCE(
-                                                %(new_config)s::json->>'working_url_pattern',
-                                                config->>'working_url_pattern'
-                                            ),
-                                            'working_job_detail_pattern',
-                                            COALESCE(
-                                                (%(new_config)s::json->>'working_job_detail_pattern'),
-                                                (config->>'working_job_detail_pattern')
-                                            ),
-                                            'redirects_externally',
-                                            COALESCE(
-                                                (%(new_config)s::json->>'redirects_externally')::boolean,
-                                                (config->>'redirects_externally')::boolean,
-                                                false
-                                            ),
-                                            'url_issues',
-                                            COALESCE(
-                                                (%(new_config)s::json->>'url_issues')::boolean,
-                                                (config->>'url_issues')::boolean,
-                                                false
-                                            )
-                                        )
-                                    ELSE config
-                                END
+                                config = json_build_object(
+                                    'working_url_pattern', 
+                                    COALESCE(
+                                        config->>'working_url_pattern',
+                                        '{{ cookiecutter.default_listing_pattern }}'
+                                    )
+                                )
                             WHERE id = %(source_id)s
-                            RETURNING config
                         """, {
                             'source_id': source['id'],
                             'now': now,
-                            'next_scrape': next_scrape,
-                            'new_config': json.dumps(updated_config)
+                            'next_scrape': next_scrape
                         })
-                        
-                        # Add logging for final config state
-                        updated_config = cur.fetchone()[0] if cur.rowcount > 0 else None
-                        logging.info(f"Final updated config in database: {json.dumps(updated_config)}")
                         
                         cur.execute("""
                             DELETE FROM company_source_issues
                             WHERE company_source_id = %(source_id)s
                         """, {'source_id': source['id']})
                     else:
-                        # Failure - increment failure count
+                        # Preserve failure increment
                         cur.execute("""
                             INSERT INTO company_source_issues (company_source_id, failure_count, last_failure)
                             VALUES (%(source_id)s, 1, NOW())
