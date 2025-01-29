@@ -91,7 +91,12 @@ def job_discovery_dag():
             for source in sources
         ]
 
-    @task(pool='scraping_bee', pool_slots=1, executor_config={"max_workers": 5})
+    @task(
+        pool='scraping_bee',
+        pool_slots=1,
+        execution_timeout=timedelta(minutes=3),  # Add explicit timeout
+        retries=0  # Let Celery handle retries
+    )
     def scrape_listings(source: Dict) -> List[Dict]:
         """
         Quickly scrapes basic job listing information.
