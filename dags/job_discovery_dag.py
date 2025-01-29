@@ -45,7 +45,7 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
-    max_active_tasks=50,  # Allow high concurrency for non-scraping tasks
+    max_active_tasks=30,  # Allow high concurrency for non-scraping tasks
     max_active_runs=3,
     dagrun_timeout=timedelta(minutes=30),
 )
@@ -53,7 +53,7 @@ def job_discovery_dag():
     """Creates a DAG for discovering new job listings."""
     
     @task
-    def get_company_sources_to_scrape(batch_size: int = 50) -> List[Dict]:
+    def get_company_sources_to_scrape(batch_size: int = 125) -> List[Dict]:
         """
         Selects company sources that are due for scraping.
         Uses a larger batch size since we're just doing quick listing scrapes.
