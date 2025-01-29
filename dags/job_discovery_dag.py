@@ -94,8 +94,9 @@ def job_discovery_dag():
     @task(
         pool='scraping_bee',
         pool_slots=1,
-        execution_timeout=timedelta(minutes=3),  # Add explicit timeout
-        retries=0  # Let Celery handle retries
+        execution_timeout=timedelta(minutes=3),  # Hard timeout
+        retries=0,  # Critical for Celery state sync
+        task_concurrency=5  # Match pool size
     )
     def scrape_listings(source: Dict) -> List[Dict]:
         """
@@ -230,8 +231,7 @@ def job_discovery_dag():
             return []
 
     @task
-    def process_listings(source_and_listings: Tuple[Dict, List[Dict]]) -> Dict[str, List[str]]:
-        """Now properly receives (source, listings) tuple"""
+    def process_listings(source_and_listings) -> Dict[str, List[str]]:
         source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
