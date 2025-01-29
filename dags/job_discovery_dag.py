@@ -13,7 +13,7 @@ Scheduling Information:
 - Short timeout per task
 """
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, tuple
 import httpx
 import logging
 import json
@@ -91,13 +91,7 @@ def job_discovery_dag():
             for source in sources
         ]
 
-    @task(
-        pool='scraping_bee',
-        pool_slots=1,
-        execution_timeout=timedelta(minutes=3),  # Hard timeout
-        retries=0,  # Critical for Celery state sync
-        task_concurrency=5  # Match pool size
-    )
+    @task(pool='scraping_bee', pool_slots=1, executor_config={"max_workers": 5})
     def scrape_listings(source: Dict) -> List[Dict]:
         """
         Quickly scrapes basic job listing information.
@@ -231,7 +225,8 @@ def job_discovery_dag():
             return []
 
     @task
-    def process_listings(source_and_listings) -> Dict[str, List[str]]:
+    def process_listings(source_and_listings: tuple[Dict, List[Dict]]) -> Dict[str, List[str]]:
+        """Now properly receives (source, listings) tuple"""
         source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
