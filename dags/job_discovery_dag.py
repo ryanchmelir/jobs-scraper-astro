@@ -45,8 +45,8 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
-    max_active_tasks=50,  # Matches scraping_bee pool size
-    max_active_runs=2,   # Allow pipeline overlap
+    max_active_tasks=50,  # Allow high concurrency for non-scraping tasks
+    max_active_runs=3,
     dagrun_timeout=timedelta(minutes=30),
 )
 def job_discovery_dag():
@@ -91,7 +91,7 @@ def job_discovery_dag():
             for source in sources
         ]
 
-    @task(pool='scraping_bee', pool_slots=1)
+    @task(pool='scraping_bee', pool_slots=1, executor_config={"max_workers": 5})
     def scrape_listings(source: Dict) -> List[Dict]:
         """
         Quickly scrapes basic job listing information.
@@ -112,7 +112,7 @@ def job_discovery_dag():
             listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
             scraping_config = source_handler.prepare_scraping_config(listings_url)
             
-            logging.info(f"Scraping listings from {listings_url} (chunk {source['chunk_id']})")
+            logging.info(f"Scraping listings from {listings_url}")
             with httpx.Client(timeout=30.0) as client:
                 response = client.get('https://app.scrapingbee.com/api/v1/', params=scraping_config)
                 
