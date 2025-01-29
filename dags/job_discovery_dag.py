@@ -13,7 +13,7 @@ Scheduling Information:
 - Short timeout per task
 """
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, tuple
+from typing import List, Dict, Optional, Tuple
 import httpx
 import logging
 import json
@@ -225,7 +225,7 @@ def job_discovery_dag():
             return []
 
     @task
-    def process_listings(source_and_listings: tuple[Dict, List[Dict]]) -> Dict[str, List[str]]:
+    def process_listings(source_and_listings: Tuple[Dict, List[Dict]]) -> Dict[str, List[str]]:
         """Now properly receives (source, listings) tuple"""
         source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
