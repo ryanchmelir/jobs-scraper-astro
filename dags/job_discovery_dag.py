@@ -225,7 +225,8 @@ def job_discovery_dag():
             return []
 
     @task
-    def process_listings(source_and_listings) -> Dict[str, List[str]]:
+    def process_listings(source_and_listings: Tuple[Dict, List[Dict]]) -> Dict[str, List[str]]:
+        """Now properly receives (source, listings) tuple"""
         source, listings = source_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
@@ -426,9 +427,13 @@ def job_discovery_dag():
     @task_group
     def process_single_source(source):
         listings = scrape_listings(source)
-        job_changes = process_listings(listings)
-        saved = save_new_jobs(job_changes)
-        update_source_status(saved)
+        # Zip source with its listings
+        source_with_listings = source.zip(listings)
+        job_changes = process_listings(source_with_listings)
+        # Zip all context for downstream
+        full_context = source.zip(job_changes, listings)
+        saved = save_new_jobs(full_context)
+        update_source_status(full_context)
         return saved
 
     process_single_source.expand(source=get_company_sources_to_scrape())
