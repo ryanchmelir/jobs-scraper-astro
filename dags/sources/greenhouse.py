@@ -209,7 +209,7 @@ class GreenhouseSource(BaseSource):
 
         # Build department ID to name mapping for traditional format
         dept_map = {}
-        for dept_header in tree.xpath('//h3[@id]|//h4[@id]'):
+        for dept_header in tree.xpath('//h2[@id]|//h3[@id]|//h4[@id]'):
             dept_id = dept_header.get('id')
             dept_name = dept_header.text_content().strip()
             if dept_id and dept_name:
@@ -264,11 +264,14 @@ class GreenhouseSource(BaseSource):
                 # Try traditional format first
                 departments = job_element.get('department_id', '').split(',')
                 if departments and departments[0]:
-                    # Try to get department name from mapping
                     department = dept_map.get(departments[0], departments[0])
                 else:
-                    # For new format, look for nearest department header
-                    dept_header = job_element.xpath('./ancestor::div[contains(@class, "job-posts")][1]/preceding-sibling::h3[contains(@class, "section-header")][1]/text()')
+                    # Multi-format fallback approach
+                    dept_header = (
+                        job_element.xpath('./ancestor::section[1]/h2[1]/text()') or  # New section/h2 format
+                        job_element.xpath('./ancestor::div[contains(@class, "job-posts")][1]/preceding-sibling::h3[contains(@class, "section-header")][1]/text()') or  # Original table format
+                        job_element.xpath('./ancestor::*[h2|h3|h4][1]/(h2|h3|h4)[1]/text()')  # Generic fallback
+                    )
                     if dept_header:
                         department = dept_header[0].strip()
                 
