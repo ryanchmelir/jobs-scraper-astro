@@ -426,14 +426,15 @@ def job_discovery_dag():
 
     @task_group
     def process_single_source(source):
+        # Get listings for the source
         listings = scrape_listings(source)
-        # Zip source with its listings
-        source_with_listings = source.zip(listings)
-        job_changes = process_listings(source_with_listings)
-        # Zip all context for downstream
-        full_context = source.zip(job_changes, listings)
-        saved = save_new_jobs(full_context)
-        update_source_status(full_context)
+        
+        # Pass complete context to downstream tasks
+        job_changes = process_listings([source, listings])
+        
+        # Pass all context to final tasks
+        saved = save_new_jobs([source, job_changes, listings])
+        update_source_status([source, job_changes, listings])
         return saved
 
     process_single_source.expand(source=get_company_sources_to_scrape())
