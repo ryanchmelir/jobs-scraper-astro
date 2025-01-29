@@ -252,10 +252,12 @@ def job_discovery_dag():
             'existing_jobs': list(scraped_job_ids & existing_job_ids)
         }
 
-    @task
+    @task(retries=3, retry_delay=timedelta(seconds=10))
     def save_new_jobs(source_changes_and_listings) -> None:
         """Save jobs with direct URLs"""
         from psycopg2.extras import execute_batch
+        from psycopg2 import OperationalError
+        from time import sleep
         source, job_changes, listings = source_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         now = datetime.utcnow()
@@ -265,87 +267,99 @@ def job_discovery_dag():
         
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
-                try:
-                    # Mark removed jobs as inactive
-                    if job_changes['removed_jobs']:
-                        logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
-                        cur.execute("""
-                            UPDATE jobs 
-                            SET active = false,
-                                updated_at = %(now)s
-                            WHERE company_source_id = %(source_id)s
-                            AND source_job_id = ANY(%(job_ids)s)
-                        """, {
-                            'source_id': source['id'],
-                            'job_ids': job_changes['removed_jobs'],
-                            'now': now
-                        })
-                        logging.info(f"Updated {cur.rowcount} removed jobs")
-                    
-                    # Update last_seen for existing jobs
-                    if job_changes['existing_jobs']:
-                        logging.info(f"Updating {len(job_changes['existing_jobs'])} existing jobs")
-                        cur.execute("""
-                            UPDATE jobs 
-                            SET last_seen = %(now)s,
-                                updated_at = %(now)s
-                            WHERE company_source_id = %(source_id)s
-                            AND source_job_id = ANY(%(job_ids)s)
-                        """, {
-                            'source_id': source['id'],
-                            'job_ids': job_changes['existing_jobs'],
-                            'now': now
-                        })
-                        logging.info(f"Updated {cur.rowcount} existing jobs")
-                    
-                    # Insert new jobs with minimal data
-                    if job_changes['new_jobs']:
-                        new_job_listings = [listing for listing in listings
-                                          if listing['source_job_id'] in job_changes['new_jobs']]
+                for attempt in range(3):
+                    try:
+                        # Mark removed jobs as inactive
+                        if job_changes['removed_jobs']:
+                            logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
+                            cur.execute("""
+                                UPDATE jobs 
+                                SET active = false,
+                                    updated_at = %(now)s
+                                WHERE company_source_id = %(source_id)s
+                                AND source_job_id = ANY(%(job_ids)s)
+                            """, {
+                                'source_id': source['id'],
+                                'job_ids': job_changes['removed_jobs'],
+                                'now': now
+                            })
+                            logging.info(f"Updated {cur.rowcount} removed jobs")
                         
-                        logging.info(f"Inserting {len(new_job_listings)} new jobs")
+                        # Update last_seen for existing jobs
+                        if job_changes['existing_jobs']:
+                            logging.info(f"Updating {len(job_changes['existing_jobs'])} existing jobs")
+                            cur.execute("""
+                                UPDATE jobs 
+                                SET last_seen = %(now)s,
+                                    updated_at = %(now)s
+                                WHERE company_source_id = %(source_id)s
+                                AND source_job_id = ANY(%(job_ids)s)
+                            """, {
+                                'source_id': source['id'],
+                                'job_ids': job_changes['existing_jobs'],
+                                'now': now
+                            })
+                            logging.info(f"Updated {cur.rowcount} existing jobs")
                         
-                        insert_params = [{
-                            'company_id': source['company_id'],
-                            'title': listing['title'],
-                            'location': listing['location'],
-                            'department': listing['department'],
-                            'url': listing['url'],
-                            'raw_data': json.dumps(listing.get('raw_data', {})),
-                            'now': now,
-                            'source_id': source['id'],
-                            'source_job_id': listing['source_job_id']
-                        } for listing in new_job_listings]
+                        # Insert new jobs with minimal data
+                        if job_changes['new_jobs']:
+                            new_job_listings = [listing for listing in listings
+                                              if listing['source_job_id'] in job_changes['new_jobs']]
+                            
+                            logging.info(f"Inserting {len(new_job_listings)} new jobs")
+                            
+                            insert_params = [{
+                                'company_id': source['company_id'],
+                                'title': listing['title'],
+                                'location': listing['location'],
+                                'department': listing['department'],
+                                'url': listing['url'],
+                                'raw_data': json.dumps(listing.get('raw_data', {})),
+                                'now': now,
+                                'source_id': source['id'],
+                                'source_job_id': listing['source_job_id']
+                            } for listing in new_job_listings]
+                            
+                            execute_batch(cur, """
+                                INSERT INTO jobs (
+                                    company_id, title, location, department, 
+                                    url, raw_data, active, first_seen, 
+                                    last_seen, created_at, updated_at, 
+                                    company_source_id, source_job_id, needs_details
+                                ) VALUES (
+                                    %(company_id)s, %(title)s, %(location)s,
+                                    %(department)s, %(url)s, %(raw_data)s, true,
+                                    %(now)s, %(now)s, %(now)s, %(now)s,
+                                    %(source_id)s, %(source_job_id)s, false
+                                )
+                                ON CONFLICT (company_source_id, source_job_id) DO UPDATE SET
+                                    active = EXCLUDED.active,
+                                    last_seen = EXCLUDED.last_seen,
+                                    updated_at = EXCLUDED.updated_at,
+                                    needs_details = EXCLUDED.needs_details
+                            """, insert_params, page_size=100)
+                            
+                            logging.info(f"Bulk inserted/updated {len(new_job_listings)} jobs")
                         
-                        execute_batch(cur, """
-                            INSERT INTO jobs (
-                                company_id, title, location, department, 
-                                url, raw_data, active, first_seen, 
-                                last_seen, created_at, updated_at, 
-                                company_source_id, source_job_id, needs_details
-                            ) VALUES (
-                                %(company_id)s, %(title)s, %(location)s,
-                                %(department)s, %(url)s, %(raw_data)s, true,
-                                %(now)s, %(now)s, %(now)s, %(now)s,
-                                %(source_id)s, %(source_job_id)s, false
-                            )
-                            ON CONFLICT (company_source_id, source_job_id) DO UPDATE SET
-                                active = EXCLUDED.active,
-                                last_seen = EXCLUDED.last_seen,
-                                updated_at = EXCLUDED.updated_at,
-                                needs_details = EXCLUDED.needs_details
-                        """, insert_params, page_size=100)
+                        conn.commit()
+                        logging.info("Successfully committed all job changes to database")
+                        break
                         
-                        logging.info(f"Bulk inserted/updated {len(new_job_listings)} jobs")
-                    
-                    conn.commit()
-                    logging.info("Successfully committed all job changes to database")
-                    
-                except Exception as e:
-                    conn.rollback()
-                    logging.error(f"Error saving jobs: {str(e)}")
-                    logging.error(f"Failed SQL parameters: {cur.query.decode()}")
-                    raise
+                    except OperationalError as e:
+                        if 'deadlock' in str(e).lower() and attempt < 2:
+                            logging.warning(f"Deadlock detected, retrying (attempt {attempt+1})")
+                            conn.rollback()
+                            sleep(0.1 * (attempt + 1))
+                            continue
+                        else:
+                            logging.error("Persistent database error")
+                            return  # Don't raise to prevent DAG failure
+                            
+                    except Exception as e:
+                        conn.rollback()
+                        logging.error(f"Error saving jobs: {str(e)}")
+                        logging.error(f"Failed SQL parameters: {cur.query.decode()}")
+                        return  # Don't raise to prevent DAG failure
 
     @task
     def update_source_status(source_and_changes_and_listings) -> None:
@@ -429,13 +443,10 @@ def job_discovery_dag():
         source_and_changes_and_listings=sources.zip(job_changes, listings)
     )
     
-    # Set up dependencies
-    chain(
-        listings,
-        job_changes,
-        save_jobs,
-        source_updates
-    )
+    # Replace chain() with isolated dependencies
+    listings >> job_changes >> save_jobs >> source_updates
+    save_jobs.trigger_rule = "none_failed"
+    source_updates.trigger_rule = "all_done"
 
 # Instantiate the DAG
 job_discovery_dag() 
