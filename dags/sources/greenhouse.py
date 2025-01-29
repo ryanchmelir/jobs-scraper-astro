@@ -35,36 +35,8 @@ try:
 except ImportError:
     SCRAPING_BEE_API_KEY = None  # Will be mocked in tests
 
-class RateLimiter:
-    """Simple rate limiter for API calls."""
-    def __init__(self, calls: int, period: float):
-        self.calls = calls  # Number of calls allowed
-        self.period = period  # Time period in seconds
-        self.timestamps = []  # Timestamp of each call
-        self.lock = Lock()  # Thread safety
-
-    def acquire(self):
-        """Wait if necessary and record the timestamp."""
-        with self.lock:
-            now = time.time()
-            # Remove timestamps older than our period
-            self.timestamps = [ts for ts in self.timestamps if ts > now - self.period]
-            
-            # If we've hit our limit, wait
-            if len(self.timestamps) >= self.calls:
-                sleep_time = self.timestamps[0] - (now - self.period)
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                self.timestamps = self.timestamps[1:]
-            
-            # Record this call
-            self.timestamps.append(now)
-
 class GreenhouseSource(BaseSource):
     """Implementation of BaseSource for Greenhouse job boards."""
-    
-    # Class-level rate limiter: 10 requests per minute
-    _rate_limiter = RateLimiter(calls=10, period=60.0)
     
     # URL patterns for Greenhouse job boards, ordered by preference
     BASE_URLS = [
@@ -82,6 +54,13 @@ class GreenhouseSource(BaseSource):
         "https://boards.greenhouse.io/{company}/jobs/{job_id}"
     ]
     
+    # Pre-compiled XPath expressions for faster parsing
+    JOB_ELEMENT_XPATHS = [
+        html.XPath('//div[contains(@class, "opening")]'),  # Traditional format
+        html.XPath('//tr[contains(@class, "job-post")]')    # New table format
+    ]
+    DEPT_HEADER_XPATH = html.XPath('//h2[@id]|//h3[@id]|//h4[@id]')
+    
     def __init__(self):
         super().__init__()
         self.html_converter = html2text.HTML2Text()
@@ -91,9 +70,17 @@ class GreenhouseSource(BaseSource):
         self.html_converter.protect_links = True  # Don't wrap links
         self.html_converter.unicode_snob = True  # Use Unicode
         self.html_converter.ul_item_mark = '-'  # Use - for unordered lists
-        # Create two clients - one that follows redirects and one that doesn't
-        self.client = httpx.Client(timeout=10.0, follow_redirects=True)
-        self.head_client = httpx.Client(timeout=10.0, follow_redirects=False)
+        # Persistent HTTP clients with connection pooling
+        self.client = httpx.Client(
+            timeout=10.0,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=5)
+        )
+        self.head_client = httpx.Client(
+            timeout=10.0,
+            follow_redirects=False,
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=5)
+        )
     
     def _check_url_head(self, url: str) -> Tuple[bool, bool]:
         """
@@ -152,10 +139,6 @@ class GreenhouseSource(BaseSource):
         return self.BASE_URLS[0].format(company=company_id)
     
     def _make_request(self, url: str) -> str:
-        """Make a rate-limited request to ScrapingBee."""
-        # Acquire rate limit token
-        self._rate_limiter.acquire()
-        
         # Make the request
         with self.client as client:
             response = client.get(url)
@@ -198,9 +181,7 @@ class GreenhouseSource(BaseSource):
             return None
 
     def parse_listings_page(self, html_content: str, source_id: str, config: Optional[Dict] = None) -> List[JobListing]:
-        """
-        Optimized parser that uses raw hrefs and converts to absolute URLs
-        """
+        """Optimized parser using pre-compiled XPaths"""
         listings = []
         tree = html.fromstring(html_content)
         
@@ -209,17 +190,16 @@ class GreenhouseSource(BaseSource):
 
         # Build department ID to name mapping for traditional format
         dept_map = {}
-        for dept_header in tree.xpath('//h2[@id]|//h3[@id]|//h4[@id]'):
+        for dept_header in self.DEPT_HEADER_XPATH(tree):
             dept_id = dept_header.get('id')
             dept_name = dept_header.text_content().strip()
             if dept_id and dept_name:
                 dept_map[dept_id] = dept_name
         
-        # Try both old and new formats
-        job_elements = (
-            tree.xpath('//div[contains(@class, "opening")]') +  # Traditional format
-            tree.xpath('//tr[contains(@class, "job-post")]')    # New table format
-        )
+        # Use pre-compiled job element XPaths
+        job_elements = []
+        for xpath in self.JOB_ELEMENT_XPATHS:
+            job_elements.extend(xpath(tree))
         
         for job_element in job_elements:
             try:
