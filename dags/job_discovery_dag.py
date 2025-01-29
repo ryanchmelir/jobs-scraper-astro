@@ -18,7 +18,7 @@ import httpx
 import logging
 import json
 
-from airflow.decorators import dag, task
+from airflow.decorators import dag, task, task_group
 from airflow.models.baseoperator import chain
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.exceptions import AirflowException
@@ -252,7 +252,7 @@ def job_discovery_dag():
             'existing_jobs': list(scraped_job_ids & existing_job_ids)
         }
 
-    @task(retries=3, retry_delay=timedelta(seconds=10))
+    @task(retries=3, retry_delay=timedelta(seconds=10), trigger_rule="all_done")
     def save_new_jobs(source_changes_and_listings) -> None:
         """Save jobs with direct URLs"""
         from psycopg2.extras import execute_batch
@@ -361,7 +361,7 @@ def job_discovery_dag():
                         logging.error(f"Failed SQL parameters: {cur.query.decode()}")
                         return  # Don't raise to prevent DAG failure
 
-    @task
+    @task(trigger_rule="all_done")
     def update_source_status(source_and_changes_and_listings) -> None:
         """Updates source status with failure tracking"""
         source, job_changes, listings = source_and_changes_and_listings
@@ -423,30 +423,15 @@ def job_discovery_dag():
                     logging.error(f"Error updating source status: {str(e)}")
                     raise
 
-    # Get sources to scrape
-    sources = get_company_sources_to_scrape()
-    
-    # Map scraping task to each source
-    listings = scrape_listings.expand(source=sources)
-    
-    # Process listings for each source
-    job_changes = process_listings.expand(
-        source_and_listings=sources.zip(listings)
-    )
-    
-    # Save new jobs and update source status
-    save_jobs = save_new_jobs.expand(
-        source_changes_and_listings=sources.zip(job_changes, listings)
-    )
-    
-    source_updates = update_source_status.expand(
-        source_and_changes_and_listings=sources.zip(job_changes, listings)
-    )
-    
-    # Replace chain() with isolated dependencies
-    listings >> job_changes >> save_jobs >> source_updates
-    save_jobs.trigger_rule = "none_failed"
-    source_updates.trigger_rule = "all_done"
+    @task_group
+    def process_single_source(source):
+        listings = scrape_listings(source)
+        job_changes = process_listings(listings)
+        saved = save_new_jobs(job_changes)
+        update_source_status(saved)
+        return saved
+
+    process_single_source.expand(source=get_company_sources_to_scrape())
 
 # Instantiate the DAG
 job_discovery_dag() 
