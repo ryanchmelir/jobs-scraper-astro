@@ -45,7 +45,7 @@ default_args = {
     start_date=datetime(2024, 1, 1),
     catchup=False,
     tags=['scraping', 'jobs', 'discovery'],
-    max_active_tasks=5,  # Matches scraping_bee pool size
+    max_active_tasks=50,  # Matches scraping_bee pool size
     max_active_runs=2,   # Allow pipeline overlap
     dagrun_timeout=timedelta(minutes=30),
 )
