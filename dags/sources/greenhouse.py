@@ -3,7 +3,7 @@ Greenhouse job board source implementation.
 Uses ScrapingBee for fetching pages and lxml for parsing.
 """
 from typing import List, Dict, Tuple, Optional
-from lxml import html
+from lxml import html, etree
 import re
 from datetime import datetime
 import logging
@@ -54,12 +54,12 @@ class GreenhouseSource(BaseSource):
         "https://boards.greenhouse.io/{company}/jobs/{job_id}"
     ]
     
-    # Pre-compiled XPath expressions for faster parsing
+    # Pre-compiled XPath expressions using correct etree.XPath
     JOB_ELEMENT_XPATHS = [
-        html.XPath('//div[contains(@class, "opening")]'),  # Traditional format
-        html.XPath('//tr[contains(@class, "job-post")]')    # New table format
+        etree.XPath('//div[contains(@class, "opening")]'),  # Fixed XPath creation
+        etree.XPath('//tr[contains(@class, "job-post")]')    # Fixed XPath creation
     ]
-    DEPT_HEADER_XPATH = html.XPath('//h2[@id]|//h3[@id]|//h4[@id]')
+    DEPT_HEADER_XPATH = etree.XPath('//h2[@id]|//h3[@id]|//h4[@id]')  # Fixed
     
     def __init__(self):
         super().__init__()
