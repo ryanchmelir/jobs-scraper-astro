@@ -92,17 +92,14 @@ class RedisCache:
         
         logger.debug(f"Syncing company {company_id} with data: {json.dumps(company_data)}")
         
-        def _sync():
+        try:
+            # Execute Redis operations directly
             pipe = self.redis.pipeline()
             pipe.hset(company_key, mapping=company_data)
             pipe.expire(company_key, self.TTL['company'])
             logger.debug(f"Executing Redis pipeline for company {company_id}")
             result = pipe.execute()
             logger.debug(f"Redis pipeline result for company {company_id}: {result}")
-            return result
-        
-        try:
-            self._execute_with_retry(_sync)
             logger.info(f"Successfully synced company {company_id}")
         except Exception as e:
             logger.error(f"Failed to sync company {company_id}")
