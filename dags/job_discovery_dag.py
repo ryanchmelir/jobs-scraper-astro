@@ -289,18 +289,59 @@ def job_discovery_dag():
                         # Update last_seen for existing jobs
                         if job_changes['existing_jobs']:
                             logging.info(f"Updating {len(job_changes['existing_jobs'])} existing jobs")
+                            
+                            # Create mapping of job_id to new data for comparison
+                            new_job_data = {
+                                listing['source_job_id']: listing 
+                                for listing in listings
+                                if listing['source_job_id'] in job_changes['existing_jobs']
+                            }
+                            
                             cur.execute("""
                                 UPDATE jobs 
                                 SET last_seen = %(now)s,
-                                    updated_at = %(now)s
+                                    title = CASE 
+                                        WHEN title != %(title)s THEN %(title)s 
+                                        ELSE title 
+                                    END,
+                                    location = CASE 
+                                        WHEN location != %(location)s THEN %(location)s 
+                                        ELSE location 
+                                    END,
+                                    department = CASE 
+                                        WHEN department != %(department)s THEN %(department)s 
+                                        ELSE department 
+                                    END,
+                                    url = CASE 
+                                        WHEN url != %(url)s THEN %(url)s 
+                                        ELSE url 
+                                    END,
+                                    updated_at = CASE 
+                                        WHEN title != %(title)s OR 
+                                             location != %(location)s OR 
+                                             department != %(department)s OR 
+                                             url != %(url)s 
+                                        THEN %(now)s 
+                                        ELSE updated_at 
+                                    END
                                 WHERE company_source_id = %(source_id)s
-                                AND source_job_id = ANY(%(job_ids)s)
-                            """, {
+                                AND source_job_id = %(job_id)s
+                            """)
+                            
+                            # Execute updates in batches
+                            update_params = [{
                                 'source_id': source['id'],
-                                'job_ids': job_changes['existing_jobs'],
+                                'job_id': job_id,
+                                'title': new_job_data[job_id]['title'],
+                                'location': new_job_data[job_id]['location'],
+                                'department': new_job_data[job_id]['department'],
+                                'url': new_job_data[job_id]['url'],
                                 'now': now
-                            })
-                            logging.info(f"Updated {cur.rowcount} existing jobs")
+                            } for job_id in job_changes['existing_jobs']]
+                            
+                            execute_batch(cur, cur.query, update_params, page_size=100)
+                            
+                            logging.info(f"Updated {len(job_changes['existing_jobs'])} existing jobs")
                         
                         # Insert new jobs with minimal data
                         if job_changes['new_jobs']:

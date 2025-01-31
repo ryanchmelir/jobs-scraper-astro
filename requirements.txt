@@ -18,3 +18,6 @@ html2text==2020.1.16  # For HTML to Markdown conversion
 python-dotenv==1.0.0  # For environment variables
 pydantic==2.5.2  # For settings management
 pydantic-settings==2.1.0  # For settings management with env vars
+
+# Redis
+redis==5.0.1  # For Redis cache management
