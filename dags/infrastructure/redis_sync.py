@@ -6,8 +6,10 @@ from typing import Dict, Optional, List, Type
 import redis
 import re
 import logging
+import traceback
 from datetime import datetime
 import time
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +31,27 @@ class RedisCache:
     ):
         """Initialize Redis connection with retry logic."""
         logger.info(f"Initializing Redis connection to {host}:{port}")
-        self.redis = redis.Redis(
-            host=host,
-            port=port,
-            password=password,
-            ssl=ssl,
-            decode_responses=True,
-            socket_timeout=socket_timeout,
-            socket_connect_timeout=socket_connect_timeout,
-            retry_on_timeout=retry_on_timeout
-        )
+        logger.debug(f"Redis config (excluding password): ssl={ssl}, socket_timeout={socket_timeout}, "
+                    f"socket_connect_timeout={socket_connect_timeout}, retry_on_timeout={retry_on_timeout}")
+        
+        try:
+            self.redis = redis.Redis(
+                host=host,
+                port=port,
+                password=password,
+                ssl=ssl,
+                decode_responses=True,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                retry_on_timeout=retry_on_timeout
+            )
+            logger.info("Redis client initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize Redis client")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error message: {str(e)}")
+            logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
+            raise
         
         # Store retry configuration
         self.retry_on_error = retry_on_error or []
@@ -66,6 +79,7 @@ class RedisCache:
         
         while retry_count < self.retry_max:
             try:
+                logger.debug(f"Testing Redis connection, attempt {retry_count + 1}/{self.retry_max}")
                 self.redis.ping()
                 logger.info("Successfully connected to Redis")
                 return
@@ -81,24 +95,33 @@ class RedisCache:
                 
                 if should_retry and retry_count < self.retry_max:
                     logger.warning(
-                        f"Redis connection attempt {retry_count} failed: {str(e)}. "
+                        f"Redis connection attempt {retry_count} failed: {type(e).__name__}: {str(e)}. "
                         f"Retrying in {self.retry_delay} seconds..."
                     )
+                    logger.debug(f"Error details:\n{''.join(traceback.format_tb(e.__traceback__))}")
                     time.sleep(self.retry_delay)
                 else:
                     break
         
         logger.error(f"Failed to connect to Redis after {retry_count} attempts")
+        logger.error(f"Final error: {type(last_error).__name__}: {str(last_error)}")
+        logger.error(f"Stack trace:\n{''.join(traceback.format_tb(last_error.__traceback__))}")
         raise last_error
     
     def _execute_with_retry(self, operation):
         """Execute Redis operation with retry logic."""
         retry_count = 0
         last_error = None
+        operation_name = getattr(operation, '__name__', 'unknown_operation')
         
         while retry_count < self.retry_max:
             try:
-                return operation()
+                logger.debug(f"Executing Redis operation '{operation_name}', attempt {retry_count + 1}/{self.retry_max}")
+                start_time = time.time()
+                result = operation()
+                duration = time.time() - start_time
+                logger.debug(f"Redis operation '{operation_name}' completed in {duration:.2f} seconds")
+                return result
             except Exception as e:
                 last_error = e
                 retry_count += 1
@@ -111,14 +134,17 @@ class RedisCache:
                 
                 if should_retry and retry_count < self.retry_max:
                     logger.warning(
-                        f"Redis operation failed attempt {retry_count}: {str(e)}. "
-                        f"Retrying in {self.retry_delay} seconds..."
+                        f"Redis operation '{operation_name}' failed attempt {retry_count}: "
+                        f"{type(e).__name__}: {str(e)}. Retrying in {self.retry_delay} seconds..."
                     )
+                    logger.debug(f"Error details:\n{''.join(traceback.format_tb(e.__traceback__))}")
                     time.sleep(self.retry_delay)
                 else:
                     break
         
-        logger.error(f"Redis operation failed after {retry_count} attempts")
+        logger.error(f"Redis operation '{operation_name}' failed after {retry_count} attempts")
+        logger.error(f"Final error: {type(last_error).__name__}: {str(last_error)}")
+        logger.error(f"Stack trace:\n{''.join(traceback.format_tb(last_error.__traceback__))}")
         raise last_error
     
     def _normalize_text(self, text: str) -> str:
@@ -145,13 +171,24 @@ class RedisCache:
             'active': '1' if active else '0'
         }
         
+        logger.debug(f"Syncing company {company_id} with data: {json.dumps(company_data)}")
+        
         def _sync():
             pipe = self.redis.pipeline()
             pipe.hset(company_key, mapping=company_data)
             pipe.expire(company_key, self.TTL['company'])
-            pipe.execute()
+            logger.debug(f"Executing Redis pipeline for company {company_id}")
+            result = pipe.execute()
+            logger.debug(f"Redis pipeline result for company {company_id}: {result}")
+            return result
         
-        self._execute_with_retry(_sync)
+        try:
+            self._execute_with_retry(_sync)
+            logger.info(f"Successfully synced company {company_id}")
+        except Exception as e:
+            logger.error(f"Failed to sync company {company_id}")
+            logger.error(f"Company data: {json.dumps(company_data)}")
+            raise
 
     def sync_job(self, job_data: Dict) -> None:
         """Sync a job to Redis with all its indices and TTLs."""
