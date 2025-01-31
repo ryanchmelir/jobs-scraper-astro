@@ -73,12 +73,16 @@ def get_redis_connection() -> RedisCache:
             'socket_connect_timeout': extra.get('socket_connect_timeout', 30),
             'retry_on_timeout': extra.get('retry_on_timeout', True),
             'retry_max': extra.get('retry_max', 3),
-            'retry_delay': extra.get('retry_delay', 1)
+            'retry_delay': extra.get('retry_delay', 1),
+            'decode_responses': extra.get('decode_responses', True)
         }
         
         # SSL configuration
         if extra.get('ssl', True):
             redis_config['connection_class'] = redis.SSLConnection
+            # Add SSL-specific settings
+            if 'ssl_cert_reqs' in extra:
+                redis_config['ssl_cert_reqs'] = extra['ssl_cert_reqs']
         
         # Map error strings to actual exception classes
         error_map = {
@@ -95,6 +99,10 @@ def get_redis_connection() -> RedisCache:
                 if err in error_map
             ]
         redis_config['retry_on_error'] = retry_on_error
+        
+        # Add any pool settings
+        if 'pool_settings' in extra:
+            redis_config.update(extra['pool_settings'])
         
         # Create a safe version of the config for logging (without password and with exception names)
         safe_config = {

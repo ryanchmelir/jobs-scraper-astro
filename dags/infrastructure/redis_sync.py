@@ -53,7 +53,8 @@ class RedisCache:
         self._retry_on_timeout = retry_on_timeout
         
         try:
-            connection_kwargs = {
+            # Base connection parameters
+            pool_kwargs = {
                 'host': host,
                 'port': port,
                 'password': password,
@@ -61,20 +62,19 @@ class RedisCache:
                 'socket_timeout': socket_timeout,
                 'socket_connect_timeout': socket_connect_timeout,
                 'retry_on_timeout': retry_on_timeout,
+                'max_connections': 10,
                 **kwargs  # Allow additional Redis connection parameters
             }
             
+            # Add connection class if specified
             if connection_class:
-                connection_kwargs['connection_class'] = connection_class
+                pool_kwargs['connection_class'] = connection_class
             
-            self.redis = redis.Redis(
-                **connection_kwargs,
-                # Add connection pool configuration
-                connection_pool=redis.ConnectionPool(
-                    **connection_kwargs,
-                    max_connections=10
-                )
-            )
+            # Create connection pool first
+            pool = redis.ConnectionPool(**pool_kwargs)
+            
+            # Create Redis client with only the pool
+            self.redis = redis.Redis(connection_pool=pool)
             logger.info("Redis client initialized successfully")
         except Exception as e:
             logger.error("Failed to initialize Redis client")
