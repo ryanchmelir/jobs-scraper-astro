@@ -20,21 +20,22 @@ class RedisCache:
         self, 
         host: str, 
         port: int, 
-        password: Optional[str] = None, 
-        ssl: bool = True,
+        password: Optional[str] = None,
+        connection_class: Optional[Type] = None,
         socket_timeout: int = 30,
         socket_connect_timeout: int = 30,
         retry_on_timeout: bool = True,
         retry_on_error: Optional[List[Type[Exception]]] = None,
         retry_max: int = 3,
-        retry_delay: int = 1
+        retry_delay: int = 1,
+        **kwargs
     ):
         """Initialize Redis connection with retry logic."""
         # Create safe config for logging
         safe_config = {
             'host': host,
             'port': port,
-            'ssl': ssl,
+            'connection_class': connection_class.__name__ if connection_class else 'default',
             'socket_timeout': socket_timeout,
             'socket_connect_timeout': socket_connect_timeout,
             'retry_on_timeout': retry_on_timeout,
@@ -52,25 +53,25 @@ class RedisCache:
         self._retry_on_timeout = retry_on_timeout
         
         try:
+            connection_kwargs = {
+                'host': host,
+                'port': port,
+                'password': password,
+                'decode_responses': True,
+                'socket_timeout': socket_timeout,
+                'socket_connect_timeout': socket_connect_timeout,
+                'retry_on_timeout': retry_on_timeout,
+                **kwargs  # Allow additional Redis connection parameters
+            }
+            
+            if connection_class:
+                connection_kwargs['connection_class'] = connection_class
+            
             self.redis = redis.Redis(
-                host=host,
-                port=port,
-                password=password,
-                ssl=ssl,
-                decode_responses=True,
-                socket_timeout=socket_timeout,
-                socket_connect_timeout=socket_connect_timeout,
-                retry_on_timeout=retry_on_timeout,
+                **connection_kwargs,
                 # Add connection pool configuration
                 connection_pool=redis.ConnectionPool(
-                    host=host,
-                    port=port,
-                    password=password,
-                    ssl=ssl,
-                    decode_responses=True,
-                    socket_timeout=socket_timeout,
-                    socket_connect_timeout=socket_connect_timeout,
-                    retry_on_timeout=retry_on_timeout,
+                    **connection_kwargs,
                     max_connections=10
                 )
             )

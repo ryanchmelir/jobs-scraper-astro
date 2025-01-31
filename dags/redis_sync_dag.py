@@ -64,17 +64,21 @@ def get_redis_connection() -> RedisCache:
         conn = BaseHook.get_connection('redis_cache')
         extra = conn.extra_dejson
         
+        # Base configuration
         redis_config = {
             'host': conn.host,
             'port': conn.port,
             'password': conn.password,
-            'ssl': extra.get('ssl', True),
             'socket_timeout': extra.get('socket_timeout', 30),
             'socket_connect_timeout': extra.get('socket_connect_timeout', 30),
             'retry_on_timeout': extra.get('retry_on_timeout', True),
             'retry_max': extra.get('retry_max', 3),
             'retry_delay': extra.get('retry_delay', 1)
         }
+        
+        # SSL configuration
+        if extra.get('ssl', True):
+            redis_config['connection_class'] = redis.SSLConnection
         
         # Map error strings to actual exception classes
         error_map = {
@@ -96,7 +100,7 @@ def get_redis_connection() -> RedisCache:
         safe_config = {
             'host': redis_config['host'],
             'port': redis_config['port'],
-            'ssl': redis_config['ssl'],
+            'connection_class': redis_config['connection_class'].__name__ if 'connection_class' in redis_config else 'default',
             'socket_timeout': redis_config['socket_timeout'],
             'socket_connect_timeout': redis_config['socket_connect_timeout'],
             'retry_on_timeout': redis_config['retry_on_timeout'],
