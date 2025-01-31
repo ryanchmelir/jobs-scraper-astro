@@ -39,7 +39,6 @@ class RedisCache:
                 retry_on_timeout=retry_on_timeout
             )
             logger.info("Redis client initialized successfully")
-            self._test_connection()
         except Exception as e:
             logger.error("Failed to initialize Redis client")
             logger.error(f"Error type: {type(e).__name__}")

@@ -63,13 +63,13 @@ def get_redis_connection() -> RedisCache:
     try:
         conn = BaseHook.get_connection('redis_cache')
         
-        # Minimal configuration with separate timeouts
+        # Minimal configuration with shorter timeouts
         redis_config = {
             'host': conn.host,
             'port': conn.port,
             'decode_responses': True,
-            'socket_connect_timeout': 5,  # Short timeout for initial connection
-            'socket_timeout': 30,         # Longer timeout for operations
+            'socket_connect_timeout': 3,  # Even shorter timeout for initial connection
+            'socket_timeout': 5,          # Shorter timeout for operations
             'retry_on_timeout': True
         }
         
