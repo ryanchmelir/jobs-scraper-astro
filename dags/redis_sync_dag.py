@@ -62,14 +62,14 @@ def get_redis_connection() -> RedisCache:
     """Get Redis connection with minimal, essential configuration."""
     try:
         conn = BaseHook.get_connection('redis_cache')
-        extra = conn.extra_dejson
         
-        # Minimal configuration
+        # Minimal configuration with separate timeouts
         redis_config = {
             'host': conn.host,
             'port': conn.port,
-            'decode_responses': True,  # Only essential parameter
-            'socket_timeout': extra.get('socket_timeout', 30),
+            'decode_responses': True,
+            'socket_connect_timeout': 5,  # Short timeout for initial connection
+            'socket_timeout': 30,         # Longer timeout for operations
             'retry_on_timeout': True
         }
         

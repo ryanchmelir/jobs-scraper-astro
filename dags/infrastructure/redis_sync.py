@@ -21,6 +21,7 @@ class RedisCache:
         host: str, 
         port: int,
         socket_timeout: int = 30,
+        socket_connect_timeout: int = 5,
         retry_on_timeout: bool = True,
         decode_responses: bool = True,
         **kwargs
@@ -33,9 +34,9 @@ class RedisCache:
                 host=host,
                 port=port,
                 socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
                 decode_responses=decode_responses,
-                retry_on_timeout=retry_on_timeout,
-                **kwargs
+                retry_on_timeout=retry_on_timeout
             )
             logger.info("Redis client initialized successfully")
             self._test_connection()
