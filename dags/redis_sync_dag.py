@@ -95,7 +95,20 @@ def get_redis_connection() -> RedisCache:
             'retry_max': extra.get('retry_max', 3),
             'retry_delay': extra.get('retry_delay', 1)
         }
-        logger.info(f"Initializing Redis connection with config: {json.dumps({k:v for k,v in redis_config.items() if k != 'password'})}")
+        
+        # Create a safe version of the config for logging (without password and with exception names)
+        safe_config = {
+            'host': redis_config['host'],
+            'port': redis_config['port'],
+            'ssl': redis_config['ssl'],
+            'socket_timeout': redis_config['socket_timeout'],
+            'socket_connect_timeout': redis_config['socket_connect_timeout'],
+            'retry_on_timeout': redis_config['retry_on_timeout'],
+            'retry_on_error': [e.__name__ for e in redis_config['retry_on_error']],
+            'retry_max': redis_config['retry_max'],
+            'retry_delay': redis_config['retry_delay']
+        }
+        logger.info(f"Initializing Redis connection with config: {json.dumps(safe_config)}")
         
         return RedisCache(**redis_config)
     except Exception as e:

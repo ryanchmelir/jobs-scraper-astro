@@ -30,9 +30,20 @@ class RedisCache:
         retry_delay: int = 1
     ):
         """Initialize Redis connection with retry logic."""
+        # Create safe config for logging
+        safe_config = {
+            'host': host,
+            'port': port,
+            'ssl': ssl,
+            'socket_timeout': socket_timeout,
+            'socket_connect_timeout': socket_connect_timeout,
+            'retry_on_timeout': retry_on_timeout,
+            'retry_on_error': [e.__name__ for e in (retry_on_error or [])],
+            'retry_max': retry_max,
+            'retry_delay': retry_delay
+        }
         logger.info(f"Initializing Redis connection to {host}:{port}")
-        logger.debug(f"Redis config (excluding password): ssl={ssl}, socket_timeout={socket_timeout}, "
-                    f"socket_connect_timeout={socket_connect_timeout}, retry_on_timeout={retry_on_timeout}")
+        logger.debug(f"Redis config: {json.dumps(safe_config)}")
         
         try:
             self.redis = redis.Redis(
