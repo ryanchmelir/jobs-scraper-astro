@@ -63,18 +63,16 @@ def get_redis_connection() -> RedisCache:
     try:
         conn = BaseHook.get_connection('redis_cache')
         
-        # Minimal configuration with shorter timeouts
         redis_config = {
             'host': conn.host,
             'port': conn.port,
             'decode_responses': True,
-            'socket_connect_timeout': 3,  # Even shorter timeout for initial connection
-            'socket_timeout': 5,          # Shorter timeout for operations
+            'socket_timeout': 30,
+            'socket_connect_timeout': 30,
             'retry_on_timeout': True
         }
         
         logger.info(f"Initializing Redis connection with config: {json.dumps(redis_config)}")
-        
         return RedisCache(**redis_config)
     except Exception as e:
         logger.error("Failed to initialize Redis connection")
@@ -144,44 +142,19 @@ def redis_sync_dag():
             logger.info(f"Starting Redis sync for {len(companies)} companies")
             
             try:
-                with log_operation_time("redis_connection_init"):
-                    cache = get_redis_connection()
-                    logger.info("Successfully initialized Redis connection")
+                cache = get_redis_connection()
+                logger.info("Successfully initialized Redis connection")
+                
+                # Sync all companies in one operation
+                cache.sync_companies_batch(companies)
+                logger.info(f"Successfully synced {len(companies)} companies")
+                
             except Exception as e:
-                logger.error("Failed to initialize Redis connection in sync_companies_to_redis")
+                logger.error("Failed to sync companies")
                 logger.error(f"Error type: {type(e).__name__}")
                 logger.error(f"Error message: {str(e)}")
                 logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
-                raise
-            
-            success_count = 0
-            error_count = 0
-            
-            for company in companies:
-                try:
-                    logger.debug(f"Syncing company {company['id']}: {company['name']}")
-                    with log_operation_time(f"sync_company_{company['id']}"):
-                        cache.sync_company(
-                            company_id=company['id'],
-                            name=company['name'],
-                            active=company['active']
-                        )
-                    success_count += 1
-                    if success_count % 10 == 0:  # Log progress every 10 companies
-                        logger.info(f"Successfully synced {success_count}/{len(companies)} companies")
-                except Exception as e:
-                    error_count += 1
-                    logger.error(f"Failed to sync company {company['id']}")
-                    logger.error(f"Company data: {json.dumps(company)}")
-                    logger.error(f"Error type: {type(e).__name__}")
-                    logger.error(f"Error message: {str(e)}")
-                    logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
-                    if error_count > len(companies) * 0.1:  # If more than 10% of companies fail
-                        raise AirflowException(f"Too many company sync failures: {error_count} failures out of {len(companies)} companies")
-            
-            logger.info(f"Company sync completed. Success: {success_count}, Errors: {error_count}")
-            if error_count > 0:
-                raise AirflowException(f"Company sync completed with {error_count} errors")
+                raise AirflowException(f"Company sync failed: {str(e)}")
         
         # Chain company sync tasks
         sync_companies_to_redis(get_active_companies())
@@ -240,8 +213,10 @@ def redis_sync_dag():
         @task
         def sync_jobs_to_redis(jobs_batch: List[Dict]) -> None:
             """Sync a batch of jobs to Redis cache."""
+            logger.info(f"Starting sync of {len(jobs_batch)} jobs")
             cache = get_redis_connection()
             
+            pipe = cache.redis.pipeline()
             for job in jobs_batch:
                 try:
                     cache.sync_job(job)
@@ -249,7 +224,7 @@ def redis_sync_dag():
                     logger.error(f"Failed to sync job {job['id']}: {str(e)}")
                     raise
             
-            logger.info(f"Successfully synced {len(jobs_batch)} jobs to Redis")
+            logger.info(f"Successfully synced {len(jobs_batch)} jobs")
         
         # Get jobs and sync them in batches
         jobs_batches = get_jobs_to_sync(sync_config['full_sync'])
