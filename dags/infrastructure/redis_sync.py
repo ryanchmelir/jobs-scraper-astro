@@ -45,6 +45,12 @@ class RedisCache:
         logger.info(f"Initializing Redis connection to {host}:{port}")
         logger.debug(f"Redis config: {json.dumps(safe_config)}")
         
+        # Store retry configuration for our own retry logic
+        self._retry_on_error = retry_on_error or []
+        self._retry_max = retry_max
+        self._retry_delay = retry_delay
+        self._retry_on_timeout = retry_on_timeout
+        
         try:
             self.redis = redis.Redis(
                 host=host,
@@ -54,7 +60,19 @@ class RedisCache:
                 decode_responses=True,
                 socket_timeout=socket_timeout,
                 socket_connect_timeout=socket_connect_timeout,
-                retry_on_timeout=retry_on_timeout
+                retry_on_timeout=retry_on_timeout,
+                # Add connection pool configuration
+                connection_pool=redis.ConnectionPool(
+                    host=host,
+                    port=port,
+                    password=password,
+                    ssl=ssl,
+                    decode_responses=True,
+                    socket_timeout=socket_timeout,
+                    socket_connect_timeout=socket_connect_timeout,
+                    retry_on_timeout=retry_on_timeout,
+                    max_connections=10
+                )
             )
             logger.info("Redis client initialized successfully")
         except Exception as e:
@@ -63,11 +81,6 @@ class RedisCache:
             logger.error(f"Error message: {str(e)}")
             logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
             raise
-        
-        # Store retry configuration
-        self.retry_on_error = retry_on_error or []
-        self.retry_max = retry_max
-        self.retry_delay = retry_delay
         
         # TTL values in seconds
         self.TTL = {
@@ -83,14 +96,21 @@ class RedisCache:
         # Test connection with retries
         self._test_connection()
     
+    def _should_retry(self, error: Exception) -> bool:
+        """Determine if we should retry on this error."""
+        return (
+            isinstance(error, tuple(self._retry_on_error)) or
+            (isinstance(error, redis.TimeoutError) and self._retry_on_timeout)
+        )
+    
     def _test_connection(self) -> None:
         """Test Redis connection with retry logic."""
         retry_count = 0
         last_error = None
         
-        while retry_count < self.retry_max:
+        while retry_count < self._retry_max:
             try:
-                logger.debug(f"Testing Redis connection, attempt {retry_count + 1}/{self.retry_max}")
+                logger.debug(f"Testing Redis connection, attempt {retry_count + 1}/{self._retry_max}")
                 self.redis.ping()
                 logger.info("Successfully connected to Redis")
                 return
@@ -98,19 +118,13 @@ class RedisCache:
                 last_error = e
                 retry_count += 1
                 
-                # Check if we should retry this error
-                should_retry = (
-                    isinstance(e, tuple(self.retry_on_error)) or
-                    (isinstance(e, redis.TimeoutError) and self.redis.retry_on_timeout)
-                )
-                
-                if should_retry and retry_count < self.retry_max:
+                if self._should_retry(e) and retry_count < self._retry_max:
                     logger.warning(
                         f"Redis connection attempt {retry_count} failed: {type(e).__name__}: {str(e)}. "
-                        f"Retrying in {self.retry_delay} seconds..."
+                        f"Retrying in {self._retry_delay} seconds..."
                     )
                     logger.debug(f"Error details:\n{''.join(traceback.format_tb(e.__traceback__))}")
-                    time.sleep(self.retry_delay)
+                    time.sleep(self._retry_delay)
                 else:
                     break
         
@@ -125,9 +139,9 @@ class RedisCache:
         last_error = None
         operation_name = getattr(operation, '__name__', 'unknown_operation')
         
-        while retry_count < self.retry_max:
+        while retry_count < self._retry_max:
             try:
-                logger.debug(f"Executing Redis operation '{operation_name}', attempt {retry_count + 1}/{self.retry_max}")
+                logger.debug(f"Executing Redis operation '{operation_name}', attempt {retry_count + 1}/{self._retry_max}")
                 start_time = time.time()
                 result = operation()
                 duration = time.time() - start_time
@@ -137,19 +151,13 @@ class RedisCache:
                 last_error = e
                 retry_count += 1
                 
-                # Check if we should retry this error
-                should_retry = (
-                    isinstance(e, tuple(self.retry_on_error)) or
-                    (isinstance(e, redis.TimeoutError) and self.redis.retry_on_timeout)
-                )
-                
-                if should_retry and retry_count < self.retry_max:
+                if self._should_retry(e) and retry_count < self._retry_max:
                     logger.warning(
                         f"Redis operation '{operation_name}' failed attempt {retry_count}: "
-                        f"{type(e).__name__}: {str(e)}. Retrying in {self.retry_delay} seconds..."
+                        f"{type(e).__name__}: {str(e)}. Retrying in {self._retry_delay} seconds..."
                     )
                     logger.debug(f"Error details:\n{''.join(traceback.format_tb(e.__traceback__))}")
-                    time.sleep(self.retry_delay)
+                    time.sleep(self._retry_delay)
                 else:
                     break
         

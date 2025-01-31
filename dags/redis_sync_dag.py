@@ -32,6 +32,7 @@ from airflow.exceptions import AirflowException
 
 from infrastructure.redis_sync import RedisCache
 from infrastructure.models import SourceType
+import redis
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -60,41 +61,36 @@ def log_operation_time(operation_name: str):
 def get_redis_connection() -> RedisCache:
     """Get Redis connection with proper error handling and retry configuration."""
     try:
-        # Get Redis connection from Airflow connections
         conn = BaseHook.get_connection('redis_cache')
-        logger.info(f"Retrieved Redis connection config for host: {conn.host}")
-        
-        # Parse extra fields
         extra = conn.extra_dejson
-        logger.debug(f"Redis extra config (excluding sensitive data): {json.dumps({k:v for k,v in extra.items() if k not in ['password']})}")
         
-        # Map retry error strings to actual exception classes
-        error_map = {
-            'ConnectionError': ConnectionError,
-            'TimeoutError': TimeoutError
+        redis_config = {
+            'host': conn.host,
+            'port': conn.port,
+            'password': conn.password,
+            'ssl': extra.get('ssl', True),
+            'socket_timeout': extra.get('socket_timeout', 30),
+            'socket_connect_timeout': extra.get('socket_connect_timeout', 30),
+            'retry_on_timeout': extra.get('retry_on_timeout', True),
+            'retry_max': extra.get('retry_max', 3),
+            'retry_delay': extra.get('retry_delay', 1)
         }
         
-        # Convert retry_on_error strings to actual exception classes
+        # Map error strings to actual exception classes
+        error_map = {
+            'ConnectionError': redis.exceptions.ConnectionError,
+            'TimeoutError': redis.exceptions.TimeoutError,
+            'redis.exceptions.TimeoutError': redis.exceptions.TimeoutError
+        }
+        
+        # Convert error strings to exception classes
         retry_on_error = []
         if 'retry_on_error' in extra:
             retry_on_error = [
                 error_map[err] for err in extra['retry_on_error']
                 if err in error_map
             ]
-            logger.info(f"Configured retry on errors: {[e.__name__ for e in retry_on_error]}")
-        
-        redis_config = {
-            'host': conn.host,
-            'port': int(conn.port),
-            'password': conn.password,
-            'ssl': extra.get('ssl', True),
-            'socket_timeout': extra.get('socket_timeout', 30),
-            'socket_connect_timeout': extra.get('socket_connect_timeout', 30),
-            'retry_on_timeout': extra.get('retry_on_timeout', True),
-            'retry_on_error': retry_on_error,
-            'retry_max': extra.get('retry_max', 3),
-            'retry_delay': extra.get('retry_delay', 1)
-        }
+        redis_config['retry_on_error'] = retry_on_error
         
         # Create a safe version of the config for logging (without password and with exception names)
         safe_config = {
