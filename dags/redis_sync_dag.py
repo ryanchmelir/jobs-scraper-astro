@@ -19,6 +19,9 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Type
 import logging
 import json
+import traceback
+from contextlib import contextmanager
+import time
 
 from airflow.decorators import dag, task, task_group
 from airflow.models.baseoperator import chain
@@ -44,14 +47,26 @@ default_args = {
     'depends_on_past': False,
 }
 
+@contextmanager
+def log_operation_time(operation_name: str):
+    """Context manager to log operation timing."""
+    start_time = time.time()
+    try:
+        yield
+    finally:
+        duration = time.time() - start_time
+        logger.info(f"{operation_name} took {duration:.2f} seconds")
+
 def get_redis_connection() -> RedisCache:
     """Get Redis connection with proper error handling and retry configuration."""
     try:
         # Get Redis connection from Airflow connections
         conn = BaseHook.get_connection('redis_cache')
+        logger.info(f"Retrieved Redis connection config for host: {conn.host}")
         
         # Parse extra fields
         extra = conn.extra_dejson
+        logger.debug(f"Redis extra config (excluding sensitive data): {json.dumps({k:v for k,v in extra.items() if k not in ['password']})}")
         
         # Map retry error strings to actual exception classes
         error_map = {
@@ -66,21 +81,28 @@ def get_redis_connection() -> RedisCache:
                 error_map[err] for err in extra['retry_on_error']
                 if err in error_map
             ]
+            logger.info(f"Configured retry on errors: {[e.__name__ for e in retry_on_error]}")
         
-        return RedisCache(
-            host=conn.host,
-            port=int(conn.port),
-            password=conn.password,
-            ssl=extra.get('ssl', True),
-            socket_timeout=extra.get('socket_timeout', 30),
-            socket_connect_timeout=extra.get('socket_connect_timeout', 30),
-            retry_on_timeout=extra.get('retry_on_timeout', True),
-            retry_on_error=retry_on_error,
-            retry_max=extra.get('retry_max', 3),
-            retry_delay=extra.get('retry_delay', 1)
-        )
+        redis_config = {
+            'host': conn.host,
+            'port': int(conn.port),
+            'password': conn.password,
+            'ssl': extra.get('ssl', True),
+            'socket_timeout': extra.get('socket_timeout', 30),
+            'socket_connect_timeout': extra.get('socket_connect_timeout', 30),
+            'retry_on_timeout': extra.get('retry_on_timeout', True),
+            'retry_on_error': retry_on_error,
+            'retry_max': extra.get('retry_max', 3),
+            'retry_delay': extra.get('retry_delay', 1)
+        }
+        logger.info(f"Initializing Redis connection with config: {json.dumps({k:v for k,v in redis_config.items() if k != 'password'})}")
+        
+        return RedisCache(**redis_config)
     except Exception as e:
-        logger.error(f"Failed to connect to Redis: {str(e)}")
+        logger.error("Failed to initialize Redis connection")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
         raise AirflowException(f"Redis connection failed: {str(e)}")
 
 @dag(
@@ -108,6 +130,7 @@ def redis_sync_dag():
             execution_date.minute < 5  # Within first 5-minute window of 2 AM
         )
         
+        logger.info(f"Sync type determined: {'full' if is_full_sync else 'incremental'} sync")
         return {'full_sync': is_full_sync}
 
     @task_group(group_id='sync_companies')
@@ -117,42 +140,71 @@ def redis_sync_dag():
         @task
         def get_active_companies() -> List[Dict]:
             """Get all active companies from PostgreSQL."""
-            pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
-            
-            sql = """
-                SELECT id, name, active
-                FROM companies
-                WHERE active = true
-            """
-            
-            companies = []
-            for row in pg_hook.get_records(sql):
-                companies.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'active': row[2]
-                })
-            
-            logger.info(f"Found {len(companies)} active companies")
-            return companies
+            with log_operation_time("get_active_companies"):
+                pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
+                
+                sql = """
+                    SELECT id, name, active
+                    FROM companies
+                    WHERE active = true
+                """
+                
+                companies = []
+                for row in pg_hook.get_records(sql):
+                    companies.append({
+                        'id': row[0],
+                        'name': row[1],
+                        'active': row[2]
+                    })
+                
+                logger.info(f"Found {len(companies)} active companies")
+                logger.debug(f"Company IDs to sync: {[c['id'] for c in companies]}")
+                return companies
         
         @task
         def sync_companies_to_redis(companies: List[Dict]) -> None:
             """Sync companies to Redis cache."""
-            cache = get_redis_connection()
+            logger.info(f"Starting Redis sync for {len(companies)} companies")
+            
+            try:
+                with log_operation_time("redis_connection_init"):
+                    cache = get_redis_connection()
+                    logger.info("Successfully initialized Redis connection")
+            except Exception as e:
+                logger.error("Failed to initialize Redis connection in sync_companies_to_redis")
+                logger.error(f"Error type: {type(e).__name__}")
+                logger.error(f"Error message: {str(e)}")
+                logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
+                raise
+            
+            success_count = 0
+            error_count = 0
             
             for company in companies:
                 try:
-                    cache.sync_company(
-                        company_id=company['id'],
-                        name=company['name'],
-                        active=company['active']
-                    )
+                    logger.debug(f"Syncing company {company['id']}: {company['name']}")
+                    with log_operation_time(f"sync_company_{company['id']}"):
+                        cache.sync_company(
+                            company_id=company['id'],
+                            name=company['name'],
+                            active=company['active']
+                        )
+                    success_count += 1
+                    if success_count % 10 == 0:  # Log progress every 10 companies
+                        logger.info(f"Successfully synced {success_count}/{len(companies)} companies")
                 except Exception as e:
-                    logger.error(f"Failed to sync company {company['id']}: {str(e)}")
-                    raise
+                    error_count += 1
+                    logger.error(f"Failed to sync company {company['id']}")
+                    logger.error(f"Company data: {json.dumps(company)}")
+                    logger.error(f"Error type: {type(e).__name__}")
+                    logger.error(f"Error message: {str(e)}")
+                    logger.error(f"Stack trace:\n{''.join(traceback.format_tb(e.__traceback__))}")
+                    if error_count > len(companies) * 0.1:  # If more than 10% of companies fail
+                        raise AirflowException(f"Too many company sync failures: {error_count} failures out of {len(companies)} companies")
             
-            logger.info(f"Successfully synced {len(companies)} companies to Redis")
+            logger.info(f"Company sync completed. Success: {success_count}, Errors: {error_count}")
+            if error_count > 0:
+                raise AirflowException(f"Company sync completed with {error_count} errors")
         
         # Chain company sync tasks
         sync_companies_to_redis(get_active_companies())
