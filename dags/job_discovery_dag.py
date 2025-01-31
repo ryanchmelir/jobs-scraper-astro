@@ -55,29 +55,15 @@ def job_discovery_dag():
     @task
     def get_company_sources_to_scrape(batch_size: int = 125) -> List[Dict]:
         """
-        Selects company sources that are due for scraping.
+        Selects company sources that are due for scraping using the get_sources_for_scraping function.
         Uses a larger batch size since we're just doing quick listing scrapes.
         """
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
-        sql = """
-            SELECT 
-                cs.id,
-                cs.company_id,
-                cs.source_type,
-                cs.source_id,
-                cs.config,
-                COALESCE(csi.failure_count, 0) as failure_count
-            FROM company_sources cs
-            LEFT JOIN company_source_issues csi ON cs.id = csi.company_source_id
-            WHERE cs.active = true 
-            AND (cs.next_scrape_time <= NOW() OR cs.next_scrape_time IS NULL)
-            AND (csi.failure_count IS NULL OR csi.failure_count < 3)
-            ORDER BY cs.next_scrape_time ASC
-            LIMIT %(batch_size)s
-            FOR UPDATE OF cs SKIP LOCKED
-        """
-        sources = pg_hook.get_records(sql, parameters={'batch_size': batch_size})
+        sources = pg_hook.get_records(
+            "SELECT * FROM get_sources_for_scraping(%(batch_size)s)",
+            parameters={'batch_size': batch_size}
+        )
         
         return [
             {
@@ -122,17 +108,13 @@ def job_discovery_dag():
                     logging.warning(f"{error_msg} for source {source['id']}")
                     
                     # Update company_source_issues
-                    pg_hook.run("""
-                        INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
-                        VALUES (%(source_id)s, 1, NOW(), %(error)s)
-                        ON CONFLICT (company_source_id) DO UPDATE SET
-                            failure_count = company_source_issues.failure_count + 1,
-                            last_failure = NOW(),
-                            last_error = %(error)s
-                    """, parameters={
-                        'source_id': source['id'],
-                        'error': error_msg
-                    })
+                    pg_hook.run(
+                        "SELECT track_source_issue(%(source_id)s, %(error)s)",
+                        parameters={
+                            'source_id': source['id'],
+                            'error': error_msg
+                        }
+                    )
                     
                     # For rate limiting, we still want to retry
                     raise AirflowException(error_msg)
@@ -144,17 +126,13 @@ def job_discovery_dag():
                     logging.error(f"Error scraping {listings_url}: {error_msg}")
                     
                     # Record the error but don't fail the task
-                    pg_hook.run("""
-                        INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
-                        VALUES (%(source_id)s, 1, NOW(), %(error)s)
-                        ON CONFLICT (company_source_id) DO UPDATE SET
-                            failure_count = company_source_issues.failure_count + 1,
-                            last_failure = NOW(),
-                            last_error = %(error)s
-                    """, parameters={
-                        'source_id': source['id'],
-                        'error': error_msg
-                    })
+                    pg_hook.run(
+                        "SELECT track_source_issue(%(source_id)s, %(error)s)",
+                        parameters={
+                            'source_id': source['id'],
+                            'error': error_msg
+                        }
+                    )
                     
                     # Return empty listings instead of failing
                     return []
@@ -178,24 +156,19 @@ def job_discovery_dag():
                 source['config']['working_url_pattern'] = scraping_config['url']
                 
                 # Clear any previous issues on success
-                pg_hook.run("""
-                    DELETE FROM company_source_issues
-                    WHERE company_source_id = %(source_id)s
-                """, parameters={'source_id': source['id']})
+                pg_hook.run(
+                    "SELECT clear_source_issues(%(source_id)s)",
+                    parameters={'source_id': source['id']}
+                )
                 
                 # Update source with listing pattern config
-                pg_hook.run("""
-                    UPDATE company_sources 
-                    SET config = json_build_object(
-                        'working_url_pattern', 
-                        COALESCE(%(pattern)s, config->>'working_url_pattern')
-                    ),
-                    next_scrape_time = NOW() + INTERVAL '10 minutes'
-                    WHERE id = %(source_id)s
-                """, parameters={
-                    'source_id': source['id'],
-                    'pattern': source['config'].get('working_url_pattern')
-                })
+                pg_hook.run(
+                    "SELECT update_source_config(%(source_id)s, %(pattern)s)",
+                    parameters={
+                        'source_id': source['id'],
+                        'pattern': source['config'].get('working_url_pattern')
+                    }
+                )
                 
                 logging.info(f"Found {len(listings_dict)} listings")
                 return listings_dict
@@ -209,17 +182,13 @@ def job_discovery_dag():
             error_msg = str(e)
             logging.error(f"Error scraping {listings_url}: {error_msg}")
             
-            pg_hook.run("""
-                INSERT INTO company_source_issues (company_source_id, failure_count, last_failure, last_error)
-                VALUES (%(source_id)s, 1, NOW(), %(error)s)
-                ON CONFLICT (company_source_id) DO UPDATE SET
-                    failure_count = company_source_issues.failure_count + 1,
-                    last_failure = NOW(),
-                    last_error = %(error)s
-            """, parameters={
-                'source_id': source['id'],
-                'error': error_msg
-            })
+            pg_hook.run(
+                "SELECT track_source_issue(%(source_id)s, %(error)s)",
+                parameters={
+                    'source_id': source['id'],
+                    'error': error_msg
+                }
+            )
             
             # Return empty listings instead of failing
             return []
@@ -255,160 +224,65 @@ def job_discovery_dag():
 
     @task(retries=3, retry_delay=timedelta(seconds=10), trigger_rule="all_done")
     def save_new_jobs(source_changes_and_listings) -> None:
-        """Save jobs with direct URLs"""
-        from psycopg2.extras import execute_batch
-        from psycopg2 import OperationalError
-        from time import sleep
+        """Save jobs with direct URLs using batch operations"""
         source, job_changes, listings = source_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
-        now = datetime.utcnow()
         
         logging.info(f"Saving jobs for source {source['id']}: {len(job_changes['new_jobs'])} new, "
                     f"{len(job_changes['removed_jobs'])} removed, {len(job_changes['existing_jobs'])} existing")
         
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
-                for attempt in range(3):
-                    try:
-                        # Mark removed jobs as inactive
-                        if job_changes['removed_jobs']:
-                            logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
-                            cur.execute("""
-                                UPDATE jobs 
-                                SET active = false,
-                                    updated_at = %(now)s
-                                WHERE company_source_id = %(source_id)s
-                                AND source_job_id = ANY(%(job_ids)s)
-                            """, {
+                try:
+                    # Mark removed jobs as inactive
+                    if job_changes['removed_jobs']:
+                        logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
+                        cur.execute(
+                            "SELECT mark_jobs_inactive(%(source_id)s, %(job_ids)s)",
+                            {
                                 'source_id': source['id'],
-                                'job_ids': job_changes['removed_jobs'],
-                                'now': now
-                            })
-                            logging.info(f"Updated {cur.rowcount} removed jobs")
-                        
-                        # Update last_seen for existing jobs
-                        if job_changes['existing_jobs']:
-                            logging.info(f"Updating {len(job_changes['existing_jobs'])} existing jobs")
-                            
-                            # Create mapping of job_id to new data for comparison
-                            new_job_data = {
-                                listing['source_job_id']: listing 
-                                for listing in listings
-                                if listing['source_job_id'] in job_changes['existing_jobs']
+                                'job_ids': job_changes['removed_jobs']
                             }
-                            
-                            cur.execute("""
-                                UPDATE jobs 
-                                SET last_seen = %(now)s,
-                                    title = CASE 
-                                        WHEN title != %(title)s THEN %(title)s 
-                                        ELSE title 
-                                    END,
-                                    location = CASE 
-                                        WHEN location != %(location)s THEN %(location)s 
-                                        ELSE location 
-                                    END,
-                                    department = CASE 
-                                        WHEN department != %(department)s THEN %(department)s 
-                                        ELSE department 
-                                    END,
-                                    url = CASE 
-                                        WHEN url != %(url)s THEN %(url)s 
-                                        ELSE url 
-                                    END,
-                                    updated_at = CASE 
-                                        WHEN title != %(title)s OR 
-                                             location != %(location)s OR 
-                                             department != %(department)s OR 
-                                             url != %(url)s 
-                                        THEN %(now)s 
-                                        ELSE updated_at 
-                                    END
-                                WHERE company_source_id = %(source_id)s
-                                AND source_job_id = %(job_id)s
-                            """)
-                            
-                            # Execute updates in batches
-                            update_params = [{
-                                'source_id': source['id'],
-                                'job_id': job_id,
-                                'title': new_job_data[job_id]['title'],
-                                'location': new_job_data[job_id]['location'],
-                                'department': new_job_data[job_id]['department'],
-                                'url': new_job_data[job_id]['url'],
-                                'now': now
-                            } for job_id in job_changes['existing_jobs']]
-                            
-                            execute_batch(cur, cur.query, update_params, page_size=100)
-                            
-                            logging.info(f"Updated {len(job_changes['existing_jobs'])} existing jobs")
+                        )
+                    
+                    # Prepare and upsert active jobs
+                    active_jobs = job_changes['new_jobs'] + job_changes['existing_jobs']
+                    if active_jobs:
+                        jobs_data = {
+                            'company_source_id': source['id'],
+                            'jobs': [
+                                {
+                                    'source_job_id': listing['source_job_id'],
+                                    'title': listing['title'],
+                                    'location': listing['location'],
+                                    'department': listing['department'],
+                                    'url': listing['url'],
+                                    'raw_data': listing.get('raw_data', {})
+                                }
+                                for listing in listings
+                                if listing['source_job_id'] in active_jobs
+                            ]
+                        }
                         
-                        # Insert new jobs with minimal data
-                        if job_changes['new_jobs']:
-                            new_job_listings = [listing for listing in listings
-                                              if listing['source_job_id'] in job_changes['new_jobs']]
-                            
-                            logging.info(f"Inserting {len(new_job_listings)} new jobs")
-                            
-                            insert_params = [{
-                                'company_id': source['company_id'],
-                                'title': listing['title'],
-                                'location': listing['location'],
-                                'department': listing['department'],
-                                'url': listing['url'],
-                                'raw_data': json.dumps(listing.get('raw_data', {})),
-                                'now': now,
-                                'source_id': source['id'],
-                                'source_job_id': listing['source_job_id']
-                            } for listing in new_job_listings]
-                            
-                            execute_batch(cur, """
-                                INSERT INTO jobs (
-                                    company_id, title, location, department, 
-                                    url, raw_data, active, first_seen, 
-                                    last_seen, created_at, updated_at, 
-                                    company_source_id, source_job_id, needs_details
-                                ) VALUES (
-                                    %(company_id)s, %(title)s, %(location)s,
-                                    %(department)s, %(url)s, %(raw_data)s, true,
-                                    %(now)s, %(now)s, %(now)s, %(now)s,
-                                    %(source_id)s, %(source_job_id)s, false
-                                )
-                                ON CONFLICT (company_source_id, source_job_id) DO UPDATE SET
-                                    active = EXCLUDED.active,
-                                    last_seen = EXCLUDED.last_seen,
-                                    updated_at = EXCLUDED.updated_at,
-                                    needs_details = EXCLUDED.needs_details
-                            """, insert_params, page_size=100)
-                            
-                            logging.info(f"Bulk inserted/updated {len(new_job_listings)} jobs")
+                        cur.execute(
+                            "SELECT * FROM upsert_jobs_batch(%(jobs_data)s)",
+                            {'jobs_data': json.dumps(jobs_data)}
+                        )
                         
-                        conn.commit()
-                        logging.info("Successfully committed all job changes to database")
-                        break
-                        
-                    except OperationalError as e:
-                        if 'deadlock' in str(e).lower() and attempt < 2:
-                            logging.warning(f"Deadlock detected, retrying (attempt {attempt+1})")
-                            conn.rollback()
-                            sleep(0.1 * (attempt + 1))
-                            continue
-                        else:
-                            logging.error("Persistent database error")
-                            return  # Don't raise to prevent DAG failure
-                            
-                    except Exception as e:
-                        conn.rollback()
-                        logging.error(f"Error saving jobs: {str(e)}")
-                        logging.error(f"Failed SQL parameters: {cur.query.decode()}")
-                        return  # Don't raise to prevent DAG failure
+                        logging.info(f"Upserted {len(active_jobs)} jobs")
+                    
+                    conn.commit()
+                    
+                except Exception as e:
+                    conn.rollback()
+                    logging.error(f"Error saving jobs: {str(e)}")
+                    raise
 
     @task(trigger_rule="all_done")
     def update_source_status(source_and_changes_and_listings) -> None:
         """Updates source status with failure tracking"""
         source, job_changes, listings = source_and_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
-        now = datetime.utcnow()
         
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
@@ -421,42 +295,30 @@ def job_discovery_dag():
                     """, {'source_id': source['id']})
                     
                     interval_minutes = cur.fetchone()[0] or 1440  # Default to 24 hours
-                    next_scrape = now + timedelta(minutes=interval_minutes)
                     
                     if listings:
-                        # Success - clear any failure records and update config
-                        cur.execute("""
-                            UPDATE company_sources 
-                            SET last_scraped = %(now)s,
-                                next_scrape_time = %(next_scrape)s,
-                                config = json_build_object(
-                                    'working_url_pattern', 
-                                    COALESCE(
-                                        config->>'working_url_pattern',
-                                        '{{ cookiecutter.default_listing_pattern }}'
-                                    )
-                                )
-                            WHERE id = %(source_id)s
-                        """, {
-                            'source_id': source['id'],
-                            'now': now,
-                            'next_scrape': next_scrape
-                        })
+                        # Success - update scrape time and clear issues
+                        cur.execute(
+                            "SELECT update_source_scrape_time(%(source_id)s, %(interval)s)",
+                            {
+                                'source_id': source['id'],
+                                'interval': interval_minutes
+                            }
+                        )
                         
-                        cur.execute("""
-                            DELETE FROM company_source_issues
-                            WHERE company_source_id = %(source_id)s
-                        """, {'source_id': source['id']})
+                        cur.execute(
+                            "SELECT clear_source_issues(%(source_id)s)",
+                            {'source_id': source['id']}
+                        )
                     else:
-                        # Preserve failure increment
-                        cur.execute("""
-                            INSERT INTO company_source_issues (company_source_id, failure_count, last_failure)
-                            VALUES (%(source_id)s, 1, NOW())
-                            ON CONFLICT (company_source_id) 
-                            DO UPDATE SET 
-                                failure_count = company_source_issues.failure_count + 1,
-                                last_failure = NOW()
-                        """, {'source_id': source['id']})
+                        # Track failure
+                        cur.execute(
+                            "SELECT track_source_issue(%(source_id)s, %(error)s)",
+                            {
+                                'source_id': source['id'],
+                                'error': 'No listings found'
+                            }
+                        )
                     
                     conn.commit()
                     
