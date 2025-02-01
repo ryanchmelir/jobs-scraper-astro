@@ -231,12 +231,19 @@ def job_discovery_dag():
         logging.info(f"Saving jobs for source {source['id']}: {len(job_changes['new_jobs'])} new, "
                     f"{len(job_changes['removed_jobs'])} removed, {len(job_changes['existing_jobs'])} existing")
         
+        # Debug logging for input data
+        logging.debug(f"Source data: {json.dumps(source, indent=2)}")
+        logging.debug(f"Job changes: {json.dumps(job_changes, indent=2)}")
+        logging.debug(f"Listings count: {len(listings)}")
+        logging.debug(f"First listing sample: {json.dumps(listings[0] if listings else None, indent=2)}")
+        
         with pg_hook.get_conn() as conn:
             with conn.cursor() as cur:
                 try:
                     # Mark removed jobs as inactive
                     if job_changes['removed_jobs']:
                         logging.info(f"Marking {len(job_changes['removed_jobs'])} jobs as inactive")
+                        logging.debug(f"Jobs to mark inactive: {job_changes['removed_jobs']}")
                         cur.execute(
                             "SELECT mark_jobs_inactive(%(source_id)s, %(job_ids)s)",
                             {
@@ -248,6 +255,13 @@ def job_discovery_dag():
                     # Prepare and upsert active jobs
                     active_jobs = job_changes['new_jobs'] + job_changes['existing_jobs']
                     if active_jobs:
+                        # Debug log active jobs
+                        logging.debug(f"Active jobs to process: {active_jobs}")
+                        
+                        # Log each listing's source_job_id for verification
+                        job_ids_in_listings = [listing.get('source_job_id') for listing in listings]
+                        logging.debug(f"source_job_ids in listings: {job_ids_in_listings}")
+                        
                         jobs_data = {
                             'company_source_id': source['id'],
                             'jobs': [
@@ -264,9 +278,16 @@ def job_discovery_dag():
                             ]
                         }
                         
+                        # Debug log the constructed jobs_data
+                        logging.debug(f"Constructed jobs_data: {json.dumps(jobs_data, indent=2)}")
+                        
+                        # Debug log the exact SQL parameters
+                        sql_params = {'jobs_data': json.dumps(jobs_data)}
+                        logging.debug(f"SQL parameters: {json.dumps(sql_params, indent=2)}")
+                        
                         cur.execute(
                             "SELECT * FROM upsert_jobs_batch(%(jobs_data)s)",
-                            {'jobs_data': json.dumps(jobs_data)}
+                            sql_params
                         )
                         
                         logging.info(f"Upserted {len(active_jobs)} jobs")
@@ -276,6 +297,8 @@ def job_discovery_dag():
                 except Exception as e:
                     conn.rollback()
                     logging.error(f"Error saving jobs: {str(e)}")
+                    # Log the full exception details
+                    logging.error(f"Full exception details:", exc_info=True)
                     raise
 
     @task(trigger_rule="all_done")
