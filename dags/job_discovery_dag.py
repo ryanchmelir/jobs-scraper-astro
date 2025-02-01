@@ -340,12 +340,13 @@ def job_discovery_dag():
                             {'source_id': source['id']}
                         )
                     else:
-                        # Track failure
+                        # Just update next scrape time without tracking as issue
+                        # Issues are already tracked in scrape_listings if there was an error
                         cur.execute(
-                            "SELECT track_source_issue(%(source_id)s, %(error)s)",
+                            "SELECT update_source_scrape_time(%(source_id)s, %(interval)s)",
                             {
                                 'source_id': source['id'],
-                                'error': 'No listings found'
+                                'interval': interval_minutes
                             }
                         )
                     
