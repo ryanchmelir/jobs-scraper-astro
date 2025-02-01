@@ -309,7 +309,7 @@ def job_discovery_dag():
 
     @task(trigger_rule="all_done")
     def update_source_status(source_and_changes_and_listings) -> None:
-        """Updates source status with failure tracking"""
+        """Updates source status with failure tracking and maintains oldest_job_seen"""
         source, job_changes, listings = source_and_changes_and_listings
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
@@ -339,6 +339,13 @@ def job_discovery_dag():
                             "SELECT clear_source_issues(%(source_id)s)",
                             {'source_id': source['id']}
                         )
+                        
+                        # Update oldest_job_seen if we found new jobs
+                        if job_changes and job_changes.get('new_jobs'):
+                            cur.execute(
+                                "SELECT update_source_oldest_jobs(%(source_id)s)",
+                                {'source_id': source['id']}
+                            )
                     else:
                         # Just update next scrape time without tracking as issue
                         # Issues are already tracked in scrape_listings if there was an error
