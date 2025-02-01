@@ -2,6 +2,7 @@
 -- Depends on: 00000000000001_dag_functions.sql
 
 -- Function to update source config and next scrape time
+DROP FUNCTION IF EXISTS update_source_config(bigint, text);
 CREATE OR REPLACE FUNCTION update_source_config(
     source_id bigint,
     url_pattern text
@@ -18,6 +19,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to clear source issues
+DROP FUNCTION IF EXISTS clear_source_issues(bigint);
 CREATE OR REPLACE FUNCTION clear_source_issues(
     source_id bigint
 ) RETURNS void AS $$
@@ -28,6 +30,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to update source scrape time
+DROP FUNCTION IF EXISTS update_source_scrape_time(bigint, integer);
 CREATE OR REPLACE FUNCTION update_source_scrape_time(
     source_id bigint,
     next_interval integer

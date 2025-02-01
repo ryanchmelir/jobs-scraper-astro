@@ -24,7 +24,7 @@ BEGIN
     LEFT JOIN company_source_issues csi ON cs.id = csi.company_source_id
     WHERE cs.active = true 
     AND (cs.next_scrape_time <= NOW() OR cs.next_scrape_time IS NULL)
-    AND (csi.failure_count IS NULL OR csi.failure_count < 3)
+    AND (csi.failure_count IS NULL OR csi.failure_count < 4)
     ORDER BY cs.next_scrape_time ASC NULLS FIRST
     LIMIT batch_size
     FOR UPDATE OF cs SKIP LOCKED;

@@ -101,14 +101,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP FUNCTION IF EXISTS update_source_scrape_time(bigint);
--- Fix update_source_scrape_time
-CREATE OR REPLACE FUNCTION update_source_scrape_time(in_source_id bigint)
-RETURNS void AS $$
+DROP FUNCTION IF EXISTS update_source_scrape_time(bigint, integer);
+CREATE OR REPLACE FUNCTION update_source_scrape_time(
+    in_source_id bigint,
+    in_next_interval integer
+) RETURNS void AS $$
 BEGIN
-    UPDATE company_sources
-    SET last_scrape_time = NOW(),
-        next_scrape_time = NOW() + INTERVAL '1 day'
+    UPDATE company_sources 
+    SET last_scraped = NOW(),
+        next_scrape_time = NOW() + (in_next_interval || ' minutes')::interval
     WHERE id = in_source_id;
 END;
 $$ LANGUAGE plpgsql; 

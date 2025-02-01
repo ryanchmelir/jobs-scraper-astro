@@ -226,6 +226,12 @@ def job_discovery_dag():
     def save_new_jobs(source_changes_and_listings) -> None:
         """Save jobs with direct URLs using batch operations"""
         source, job_changes, listings = source_changes_and_listings
+        
+        # Handle case where upstream mapped task failed
+        if job_changes is None:
+            logging.info(f"Skipping save_new_jobs for source {source['id']} - upstream task failed")
+            return
+        
         pg_hook = PostgresHook(postgres_conn_id='postgres_jobs_db')
         
         logging.info(f"Saving jobs for source {source['id']}: {len(job_changes['new_jobs'])} new, "
@@ -296,9 +302,9 @@ def job_discovery_dag():
                     
                 except Exception as e:
                     conn.rollback()
-                    logging.error(f"Error saving jobs: {str(e)}")
+                    logging.error(f"Error saving jobs for source {source['id']}: {str(e)}")
                     # Log the full exception details
-                    logging.error(f"Full exception details:", exc_info=True)
+                    logging.error("Full exception details:", exc_info=True)
                     raise
 
     @task(trigger_rule="all_done")
