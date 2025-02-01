@@ -154,6 +154,7 @@ class GreenhouseSource(BaseSource):
         - https://boards.greenhouse.io/embed/job_app?for=company&token=1234
         - /embed/job_app?token=1234
         - https://boards.greenhouse.io/company/jobs/1234?gh_jid=1234
+        - https://job-boards.greenhouse.io/embed/job_board?for=company/jobs/1234
         """
         try:
             # Split URL into path and query parts
@@ -162,7 +163,7 @@ class GreenhouseSource(BaseSource):
             # First try to extract from path
             parts = base_url.strip('/').split('/')
             for part in reversed(parts):
-                if part.isdigit():
+                if part.isdigit() and len(part) > 4:  # Job IDs are typically longer than 4 digits
                     return part
             
             # If not found in path, check URL parameters
@@ -174,7 +175,15 @@ class GreenhouseSource(BaseSource):
                 for param in ['token', 'gh_jid']:
                     if param in params and params[param].isdigit():
                         return params[param]
+                
+                # Check for job ID in 'for' parameter path
+                if 'for' in params:
+                    for_parts = params['for'].split('/')
+                    for part in reversed(for_parts):
+                        if part.isdigit() and len(part) > 4:  # Job IDs are typically longer than 4 digits
+                            return part
             
+            logging.debug(f"Could not extract job ID from URL using any known pattern: {href}")
             return None
         except Exception as e:
             logging.debug(f"Error extracting job ID from {href}: {str(e)}")

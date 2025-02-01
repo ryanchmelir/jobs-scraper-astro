@@ -24,19 +24,20 @@ BEGIN
     SELECT 
         cs.company_id,
         (jobs_data->>'company_source_id')::bigint,
-        jobs_data->>'source_job_id',
-        jobs_data->>'title',
-        jobs_data->>'location',
-        jobs_data->>'department',
-        jobs_data->>'url',
-        (jobs_data->>'raw_data')::jsonb,
+        job->>'source_job_id',
+        job->>'title',
+        job->>'location',
+        job->>'department',
+        job->>'url',
+        (job->>'raw_data')::jsonb,
         true,
         NOW(),
         NOW(),
         NOW(),
         NOW(),
         false
-    FROM company_sources cs
+    FROM company_sources cs,
+         jsonb_array_elements(jobs_data->'jobs') as job
     WHERE cs.id = (jobs_data->>'company_source_id')::bigint
     ON CONFLICT (company_source_id, source_job_id) DO UPDATE
     SET 
@@ -72,7 +73,7 @@ DROP FUNCTION IF EXISTS track_source_issue(bigint, text);
 CREATE OR REPLACE FUNCTION track_source_issue(in_source_id bigint, in_error text)
 RETURNS void AS $$
 BEGIN
-    INSERT INTO company_source_issues (company_source_id, error)
+    INSERT INTO company_source_issues (company_source_id, last_error)
     VALUES (in_source_id, in_error);
 END;
 $$ LANGUAGE plpgsql;
