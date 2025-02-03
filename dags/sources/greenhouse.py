@@ -40,18 +40,18 @@ class GreenhouseSource(BaseSource):
     
     # URL patterns for Greenhouse job boards, ordered by preference
     BASE_URLS = [
-        "https://job-boards.greenhouse.io/embed/job_board?for={company}",  # Most reliable
+        "https://boards.greenhouse.io/{company}",
         "https://boards.greenhouse.io/embed/job_board?for={company}",
         "https://job-boards.greenhouse.io/{company}",
-        "https://boards.greenhouse.io/{company}"
+        "https://job-boards.greenhouse.io/embed/job_board?for={company}"
     ]
     
     # URL patterns for job detail pages, ordered by preference
     JOB_DETAIL_URLS = [
-        "https://job-boards.greenhouse.io/embed/job_app?for={company}&token={job_id}",
-        "https://boards.greenhouse.io/embed/job_app?for={company}&token={job_id}",
         "https://job-boards.greenhouse.io/{company}/jobs/{job_id}",
-        "https://boards.greenhouse.io/{company}/jobs/{job_id}"
+        "https://boards.greenhouse.io/{company}/jobs/{job_id}",
+        "https://job-boards.greenhouse.io/embed/job_app?for={company}&token={job_id}",
+        "https://boards.greenhouse.io/embed/job_app?for={company}&token={job_id}"
     ]
     
     # Pre-compiled XPath expressions using correct etree.XPath

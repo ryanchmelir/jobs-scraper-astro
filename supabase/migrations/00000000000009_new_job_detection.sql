@@ -3,7 +3,7 @@
 ALTER TABLE company_sources
     ADD COLUMN oldest_job_seen timestamptz;
 
--- Function to maintain oldest_job_seen
+-- Function for trigger-based updates
 CREATE OR REPLACE FUNCTION update_oldest_job_seen()
 RETURNS trigger AS $$
 BEGIN
@@ -17,6 +17,26 @@ BEGIN
         WHERE id = NEW.company_source_id;
     END IF;
     RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function for direct DAG updates
+CREATE OR REPLACE FUNCTION update_source_oldest_jobs(p_source_id integer)
+RETURNS timestamptz AS $$
+DECLARE
+    updated_time timestamptz;
+BEGIN
+    UPDATE company_sources cs
+    SET oldest_job_seen = (
+        SELECT MIN(first_seen)
+        FROM jobs
+        WHERE company_source_id = p_source_id
+        AND active = true
+    )
+    WHERE cs.id = p_source_id
+    RETURNING oldest_job_seen INTO updated_time;
+    
+    RETURN updated_time;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -35,11 +55,12 @@ SET oldest_job_seen = (
     AND active = true
 );
 
--- Create rollback function
+-- Update rollback function to include both
 CREATE OR REPLACE FUNCTION rollback_new_job_detection() RETURNS void AS $$
 BEGIN
     DROP TRIGGER IF EXISTS maintain_oldest_job_seen ON jobs;
     DROP FUNCTION IF EXISTS update_oldest_job_seen();
+    DROP FUNCTION IF EXISTS update_source_oldest_jobs(integer);
     ALTER TABLE company_sources DROP COLUMN IF EXISTS oldest_job_seen;
 END;
 $$ LANGUAGE plpgsql;
