@@ -95,7 +95,13 @@ def job_discovery_dag():
         logging.info(f"Initial source config in scrape_listings: {json.dumps(source.get('config'))}")
         
         try:
-            listings_url = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
+            # Get listings URL and update config with working pattern
+            listings_url, working_pattern = source_handler.get_listings_url(source['source_id'], source.get('config', {}))
+            if working_pattern:
+                if source.get('config') is None:
+                    source['config'] = {}
+                source['config']['working_url_pattern'] = working_pattern
+            
             scraping_config = source_handler.prepare_scraping_config(listings_url)
             
             logging.info(f"Scraping listings from {listings_url}")
@@ -137,7 +143,20 @@ def job_discovery_dag():
                     # Return empty listings instead of failing
                     return []
                 
-                listings = source_handler.parse_listings_page(response.text, source['source_id'], source.get('config', {}))
+                # Parse listings and get updated config
+                listings, updated_config = source_handler.parse_listings_page(response.text, source['source_id'], source.get('config', {}))
+                
+                # Update source config with any new patterns
+                if updated_config:
+                    source['config'] = updated_config
+                    pg_hook.run(
+                        "SELECT update_source_config(%(source_id)s, %(config)s)",
+                        parameters={
+                            'source_id': source['id'],
+                            'config': json.dumps(source['config'])
+                        }
+                    )
+                
                 listings_dict = [
                     {
                         'source_job_id': listing.source_job_id,
@@ -150,24 +169,10 @@ def job_discovery_dag():
                     for listing in listings
                 ]
                 
-                # Update source config if needed
-                if source.get('config') is None:
-                    source['config'] = {}
-                source['config']['working_url_pattern'] = scraping_config['url']
-                
                 # Clear any previous issues on success
                 pg_hook.run(
                     "SELECT clear_source_issues(%(source_id)s)",
                     parameters={'source_id': source['id']}
-                )
-                
-                # Update source with listing pattern config
-                pg_hook.run(
-                    "SELECT update_source_config(%(source_id)s, %(pattern)s)",
-                    parameters={
-                        'source_id': source['id'],
-                        'pattern': source['config'].get('working_url_pattern')
-                    }
                 )
                 
                 logging.info(f"Found {len(listings_dict)} listings")

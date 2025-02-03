@@ -41,8 +41,8 @@ class GreenhouseSource(BaseSource):
     # URL patterns for Greenhouse job boards, ordered by preference
     BASE_URLS = [
         "https://boards.greenhouse.io/{company}",
-        "https://boards.greenhouse.io/embed/job_board?for={company}",
         "https://job-boards.greenhouse.io/{company}",
+        "https://boards.greenhouse.io/embed/job_board?for={company}",
         "https://job-boards.greenhouse.io/embed/job_board?for={company}"
     ]
     
@@ -106,8 +106,11 @@ class GreenhouseSource(BaseSource):
             logging.debug(f"HEAD request failed for {url}: {str(e)}")
             return False, False
     
-    def get_listings_url(self, company_id: str, config: Optional[Dict] = None) -> str:
-        """Get the URL for the company's job listings page."""
+    def get_listings_url(self, company_id: str, config: Optional[Dict] = None) -> Tuple[str, Optional[str]]:
+        """
+        Get the URL for the company's job listings page.
+        Returns (url, working_pattern) tuple.
+        """
         config = config or {}
         
         # Check for cached pattern first
@@ -117,26 +120,26 @@ class GreenhouseSource(BaseSource):
                 success, _ = self._check_url_head(url)
                 if success:
                     logging.info(f"Using cached URL pattern for {company_id}")
-                    return url
+                    return url, cached_pattern
                 logging.warning(f"Cached URL pattern failed for {company_id}, trying alternatives")
             except Exception as e:
                 logging.warning(f"Error with cached URL pattern: {str(e)}")
         
-        # Try each pattern in order
+        # Try each pattern in strict order
         for pattern in self.BASE_URLS:
             try:
                 url = pattern.format(company=company_id)
                 success, _ = self._check_url_head(url)
                 if success:
                     logging.info(f"Found working URL pattern for {company_id}")
-                    return url
+                    return url, pattern
             except Exception as e:
                 logging.debug(f"Pattern {pattern} failed: {str(e)}")
                 continue
         
         # If all patterns fail, use first pattern as fallback
         logging.warning(f"No working URL pattern found for {company_id}, using default")
-        return self.BASE_URLS[0].format(company=company_id)
+        return self.BASE_URLS[0].format(company=company_id), None
     
     def _make_request(self, url: str) -> str:
         # Make the request
@@ -189,8 +192,12 @@ class GreenhouseSource(BaseSource):
             logging.debug(f"Error extracting job ID from {href}: {str(e)}")
             return None
 
-    def parse_listings_page(self, html_content: str, source_id: str, config: Optional[Dict] = None) -> List[JobListing]:
-        """Optimized parser using pre-compiled XPaths"""
+    def parse_listings_page(self, html_content: str, source_id: str, config: Optional[Dict] = None) -> Tuple[List[JobListing], Dict]:
+        """
+        Optimized parser using pre-compiled XPaths.
+        Returns (listings, updated_config) tuple.
+        """
+        config = config or {}
         listings = []
         tree = html.fromstring(html_content)
         
@@ -210,6 +217,9 @@ class GreenhouseSource(BaseSource):
         for xpath in self.JOB_ELEMENT_XPATHS:
             job_elements.extend(xpath(tree))
         
+        # Track if we've validated a partial URL pattern yet
+        validated_pattern = None
+        
         for job_element in job_elements:
             try:
                 # Handle both formats for job links
@@ -225,11 +235,54 @@ class GreenhouseSource(BaseSource):
                 job_link = job_links[0]
                 job_url = job_link.get('href')
                 
-                # Convert to absolute URL
+                # Convert to absolute URL if needed
                 if job_url.startswith('/'):
                     job_url = f"{base_url.rstrip('/')}{job_url}"
                 elif not job_url.startswith('http'):
                     job_url = f"{base_url}{job_url}"
+                
+                # Extract job ID from href
+                job_id = self._extract_job_id(job_url)
+                if not job_id:
+                    logging.error(f"Could not extract job ID from URL: {job_url}")
+                    continue
+                
+                final_url = job_url
+                # If it's a full URL, trust it
+                if job_url.startswith(('http://', 'https://')):
+                    final_url = job_url
+                else:
+                    # For partial URLs, validate pattern once
+                    if validated_pattern is None:
+                        # Try cached pattern first
+                        if cached_pattern := config.get('working_job_detail_pattern'):
+                            test_url = cached_pattern.format(company=source_id, job_id=job_id)
+                            success, _ = self._check_url_head(test_url)
+                            if success:
+                                validated_pattern = cached_pattern
+                            else:
+                                logging.warning(f"Cached job detail pattern failed, trying alternatives")
+                        
+                        # If no cached pattern or it failed, try patterns in order
+                        if validated_pattern is None:
+                            for pattern in self.JOB_DETAIL_URLS:
+                                test_url = pattern.format(company=source_id, job_id=job_id)
+                                success, _ = self._check_url_head(test_url)
+                                if success:
+                                    validated_pattern = pattern
+                                    break
+                            
+                            # If all patterns fail, use first pattern
+                            if validated_pattern is None:
+                                logging.warning(f"No working job detail pattern found, using default")
+                                validated_pattern = self.JOB_DETAIL_URLS[0]
+                    
+                    # Use validated pattern for this and all subsequent partial URLs
+                    final_url = validated_pattern.format(company=source_id, job_id=job_id)
+                
+                # Save working pattern to config if we found one
+                if validated_pattern and validated_pattern != config.get('working_job_detail_pattern'):
+                    config['working_job_detail_pattern'] = validated_pattern
                 
                 # Extract title - handle both formats
                 title_elements = (
@@ -264,17 +317,11 @@ class GreenhouseSource(BaseSource):
                     if dept_header:
                         department = dept_header[0].strip()
                 
-                # Extract job ID from href
-                job_id = self._extract_job_id(job_url)
-                if not job_id:
-                    logging.error(f"Could not extract job ID from URL: {job_url}")
-                    continue
-                
                 # Create raw data with original URL
                 raw_data = {
                     'source': 'greenhouse',
                     'source_id': source_id,
-                    'original_url': job_url,  # Store the direct href
+                    'original_url': job_url,  # Store the original href
                     'scraped_at': datetime.utcnow().isoformat()
                 }
 
@@ -283,7 +330,7 @@ class GreenhouseSource(BaseSource):
                     title=title,
                     location=location,
                     department=department,
-                    url=job_url,  # Use direct href
+                    url=final_url,  # Use validated URL
                     raw_data=raw_data
                 )
                 listings.append(listing)
@@ -295,7 +342,7 @@ class GreenhouseSource(BaseSource):
         if not listings:
             logging.warning(f"No job listings found for source_id: {source_id}")
             
-        return listings
+        return listings, config
     
     def get_job_detail_url(self, listing: Dict | JobListing, config: Optional[Dict] = None) -> Tuple[str, str, Optional[str]]:
         """
@@ -511,3 +558,40 @@ class GreenhouseSource(BaseSource):
             config['wait_for'] = '//div[@id="content"]'
             
         return config 
+
+    def validate_job_url(self, job_url: str, company_id: str, job_id: str, config: Optional[Dict] = None) -> Tuple[str, Optional[str]]:
+        """
+        Validate and potentially fix job URLs.
+        Returns (url, working_pattern) tuple.
+        """
+        config = config or {}
+        
+        # If it's a full URL, verify it works
+        if job_url.startswith(('http://', 'https://')):
+            success, _ = self._check_url_head(job_url)
+            if success:
+                return job_url, None
+        
+        # Try cached pattern first if we have one
+        if cached_pattern := config.get('working_job_detail_pattern'):
+            try:
+                test_url = cached_pattern.format(company=company_id, job_id=job_id)
+                success, _ = self._check_url_head(test_url)
+                if success:
+                    return test_url, cached_pattern
+            except Exception as e:
+                logging.warning(f"Error with cached job detail pattern: {str(e)}")
+        
+        # Try each pattern in order
+        for pattern in self.JOB_DETAIL_URLS:
+            try:
+                test_url = pattern.format(company=company_id, job_id=job_id)
+                success, _ = self._check_url_head(test_url)
+                if success:
+                    return test_url, pattern
+            except Exception as e:
+                logging.debug(f"Job detail pattern {pattern} failed: {str(e)}")
+                continue
+        
+        # If all fail, return first pattern
+        return self.JOB_DETAIL_URLS[0].format(company=company_id, job_id=job_id), None 
